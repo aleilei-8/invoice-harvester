@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-page-node-id="KbvplagW8sCWQaHg1jExrP">
+<head data-page-node-id="WFVlk4nNpY0WABSDoQQO9e">
+  <meta charset="UTF-8" data-page-node-id="lLUrxlA7s1SCqfFh7g4xB9" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" data-page-node-id="bSfE9os9UlFUvZf1yvrjwy" />
+  <link rel="stylesheet" href="popup.css" data-page-node-id="lVBUZ81ruuirNh85tGGSfy" />
+</head>
+<body data-page-node-id="xYH2d6mJ4ja7FBPvgCuCTJ">
+  <header class="hd" data-page-node-id="jDWkrz8PhLSAUbYw0pu7Pa">
+    <div class="hd-title" data-page-node-id="HqbKrKr9ZIUDOWJ4gN1WjF">电商开票信息抓取器</div>
+    <div class="hd-sub" id="status" data-page-node-id="tN9UNGY1uqhsPhVUyzWtCc">选择平台 → 打开商家后台 → 点「抓取」</div>
+  </header>
+
+  <section class="toolbar" data-page-node-id="kOEMvm2bOQfgXhQD7nSHso">
+    <button id="btn-grab" class="btn btn-primary" data-page-node-id="yeBpz2gXHG1FA0w9RPP1NH">抓取本页</button>
+    <button id="btn-append" class="btn" data-page-node-id="Ukfc6xTF4q5H4ZjykSn1ZI">追加到汇总库</button>
+    <button id="btn-export-csv" class="btn" data-page-node-id="qF6jG1U2WecY1otMLLCN2M">导出 CSV</button>
+    <button id="btn-export-xlsx" class="btn btn-primary" data-page-node-id="x1x2x3x4x5x6x7x8x9x0x1">导出 XLSX</button>
+    <button id="btn-clear" class="btn btn-danger" data-page-node-id="4WPptMUrkBV066GDK70mbv">清空库</button>
+    <label class="opt" data-page-node-id="optg01x2x3x4x5"><input type="checkbox" id="opt-group" checked /> 含抬头汇总</label>
+  </section>
+
+  <section class="platform-bar" data-page-node-id="2aDIVC20VBQ6AdTuBgfxow">
+    <label class="pb-label" for="platform" data-page-node-id="cySAGeXtnKR4HhhrZedhi5">平台</label>
+    <select id="platform" class="pb-select" data-page-node-id="VGjiVTeFvFTJwHC3c7OB9f"></select>
+    <button id="btn-kw" class="btn btn-mini" data-page-node-id="7Y4MvqFDqqAcWNZbN0fUMh">编辑关键词</button>
+  </section>
+
+  <div id="kw-editor" class="kw-editor" hidden data-page-node-id="vYlVz2S0ICOQ76gJk3aDzE">
+    <div class="kw-tip" data-page-node-id="e9zOnypkGDMND6wrqKPYCj">自定义模式：修改下方 JSON（角色 → 关键词数组）后点「保存」。最长命中关键词优先，可加英文别名（如 tax / order / tracking）。</div>
+    <textarea id="kw-edit" class="kw-text" spellcheck="false"></textarea>
+    <div class="kw-actions" data-page-node-id="uChhyNRZn13bgAaf4OYInz">
+      <button id="btn-kw-save" class="btn btn-mini btn-primary" data-page-node-id="33aoYRx7a7TlfaD3SbMnjj">保存</button>
+      <button id="btn-kw-reset" class="btn btn-mini" data-page-node-id="J3vbiyhfFFdjG9JU1IrFfE">恢复默认</button>
+      <span id="kw-msg" class="kw-msg" data-page-node-id="vs0mIhYVMK2prQTzw9OqSx"></span>
+    </div>
+  </div>
+
+  <section class="meta" data-page-node-id="R3m8M2J3Ze3LqnuUgJintL">
+    <span class="pill" id="lib-count" data-page-node-id="voP87y26gOVxxFYfZb0U9J">汇总库：0 条</span>
+    <span class="pill pill-soft" id="grab-count" data-page-node-id="upGYQqtWwnQCNMiIFsZtAd">本次抓取：0 张表</span>
+  </section>
+
+  <section id="tables" class="tables" data-page-node-id="FDEY5E3mY59bPj5uNB0OzH"></section>
+
+  <section class="log" id="log" data-page-node-id="R0xY6E2q2Qs2ldkRIkGQgs"></section>
+
+  <footer class="compliance">
+    合规提示：本工具仅读取你本人已登录的店铺数据并存于本地浏览器，不上传任何服务器。
+    仅抓取<b>开票必需字段</b>（抬头/税号/订单号/金额/物品），非必要勿抓收货人电话等敏感个人信息；
+    据此开具的发票须真实、金额与实付一致。使用者须遵守平台规则与《个人信息保护法》。
+  </footer>
+
+  <script src="lib.js"></script>
+  <script src="xlsx.full.min.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

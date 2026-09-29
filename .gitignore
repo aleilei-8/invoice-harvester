@@ -1,0 +1,10 @@
+# 测试与构建产物
+_test_lib.js
+*.zip
+__pycache__/
+*.pyc
+
+# 系统 / 编辑器
+.DS_Store
+Thumbs.db
+.pdd_config.json

@@ -1,0 +1,27 @@
+{
+  "manifest_version": 3,
+  "name": "电商开票信息抓取器",
+  "version": "2.1.0",
+  "description": "通用浏览器插件：在拼多多/淘宝/京东/抖音等任意电商商家后台自动识别并抓取买家开票信息（发票抬头/税号/订单号/快递单号/金额/物品），本地累积汇总、按订单号去重合并，一键导出表格。无需开放平台资质，装上即用。",
+  "permissions": ["activeTab", "scripting", "storage"],
+  "host_permissions": [
+    "https://mms.pinduoduo.com/*",
+    "https://*.pinduoduo.com/*",
+    "https://*.taobao.com/*",
+    "https://*.tmall.com/*",
+    "https://*.jd.com/*",
+    "https://*.douyin.com/*",
+    "https://*.jinritemai.com/*",
+    "https://fxg.jinritemai.com/*",
+    "https://*.feihong.cc/*",
+    "https://*.kuaishou.com/*",
+    "https://*.1688.com/*"
+  ],
+  "action": {
+    "default_title": "电商开票信息抓取器",
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  }
+}

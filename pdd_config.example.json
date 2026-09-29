@@ -1,0 +1,18 @@
+{
+  "shops": [
+    {
+      "name": "企业店",
+      "client_id": "替换为开放平台应用的client_id",
+      "client_secret": "替换为开放平台应用的client_secret",
+      "access_token": "替换为该店铺主账号OAuth授权得到的access_token",
+      "order_sn": ""
+    },
+    {
+      "name": "个人店",
+      "client_id": "替换为开放平台应用的client_id",
+      "client_secret": "替换为开放平台应用的client_secret",
+      "access_token": "替换为该店铺主账号OAuth授权得到的access_token",
+      "order_sn": ""
+    }
+  ]
+}
