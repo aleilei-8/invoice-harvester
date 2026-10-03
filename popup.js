@@ -228,6 +228,22 @@ function extractTables(roleKeywords, fields) {
     else if (role === "op") { rec._op = (rec._op ? rec._op + " " : "") + v; }
   }
 
+  // 从物流行文本提取「快递公司 + 快递单号」
+  // 真实样例（截图确认）：
+  //   物流信息：极兔速递 J1309616537749 复制 ✅您的快件已签收，签收人：【小江浔浔瑶台代收】…
+  //   物流信息：申通快递 773430693399235 复制 ✅已签收…
+  //   物流信息：中通快递 7901738059807 复制 ✅您的快件已送达…【芳哥：15062222167】…
+  // 注意：行文里还有电话号码（11位），所以运单号必须紧跟在快递公司名之后取，避免误抓电话。
+  function parseLogisticsRow(rec, rowText) {
+    const m = rowText.match(
+      /物流信息[:：]\s*([\u4e00-\u9fa5]{2,12}?(?:快递|速运|速递|物流|货运|邮政))\s*([A-Za-z0-9]{8,30})/
+    );
+    if (m) {
+      rec.logistics = m[1] + " " + m[2];
+      if (!rec.tracking_no) rec.tracking_no = m[2];
+    }
+  }
+
   // 把一张订单表解析成标准记录
   function parseOrderTable(c, template) {
     const headText = (c.headerCells || []).join("\n");
@@ -257,6 +273,12 @@ function extractTables(roleKeywords, fields) {
     };
 
     (c.allCellRows || []).forEach((row) => {
+      const rowText = row.join(" ");
+      // 物流行：整行是一段「物流信息：快递公司 运单号 复制 ✅轨迹…」，直接提取快递公司+单号
+      if (/物流信息[:：]/.test(rowText)) {
+        parseLogisticsRow(rec, rowText);
+        return;
+      }
       const n = row.length;
       const map = {};
       if (n === tCols.length - 1) {
@@ -279,7 +301,8 @@ function extractTables(roleKeywords, fields) {
     });
 
     const op = rec._op || "";
-    if (/物流信息/.test(op)) rec.logistics = "可查(点物流信息)";
+    // 操作列里有「物流信息」按钮但没解析到物流行 → 说明未发货或需要点进详情，仅作标记
+    if (!rec.logistics && /物流信息/.test(op)) rec.logistics = "可查(点物流信息)";
     const ub = op.match(/用户备注[:：]\s*(\S+)/);
     const bl = op.match(/买家留言[:：]\s*(\S+)/);
     const parts = [];
@@ -292,12 +315,10 @@ function extractTables(roleKeywords, fields) {
   }
 
   // 把多张订单表解析出的记录合并成一张「订单查询」卡片表（写入汇总库按订单号去重）
+  // 用户需求（v2.3.1）：订单页只抓 订单号 / 物品名称 / 物流信息（快递公司+快递单号），
+  // 其余（收货信息、买家、状态、金额等）不抓；导出时与发票页数据按订单号合并补齐。
   function orderRecordsToCard(recs) {
-    const seq = [
-      "order_id", "order_status", "after_sale", "trans_time", "qty", "goods_total", "amount",
-      "tracking_no", "logistics", "ship_to", "items", "invoice_date", "apply_date",
-      "buyer_title", "tax_no", "invoice_kind", "invoice_type", "extra_info", "buyer", "remark",
-    ];
+    const seq = ["order_id", "items", "tracking_no", "logistics"];
     const headers = seq.map((k) => labelOf[k] || k);
     const roleMap = {}; const autoRoles = [];
     seq.forEach((k, i) => { roleMap[i] = k; autoRoles.push(i); });
