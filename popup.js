@@ -8,10 +8,10 @@ const PLATFORM_PRESETS = {
     name: "拼多多",
     keywords: {
       buyer_title: ["发票抬头", "抬头", "公司名称", "购买方名称", "购方名称", "名称"],
-      tax_no: ["税号", "纳税人识别号", "统一社会信用代码", "识别号", "信用代码", "tax", "tin", "纳税人"],
+      tax_no: ["企业税号", "税号", "纳税人识别号", "统一社会信用代码", "识别号", "信用代码", "tax", "tin", "纳税人"],
       order_id: ["订单号", "订单编号", "订单", "单号", "order", "no.", "编号"],
       tracking_no: ["快递单号", "物流单号", "运单号", "货运单号", "tracking", "waybill", "物流"],
-      amount: ["金额", "价税合计", "开票金额", "实付金额", "合计", "金额(元)", "amount", "price", "价税"],
+      amount: ["发票金额", "金额", "价税合计", "开票金额", "实付金额", "合计", "金额(元)", "amount", "price", "价税"],
       items: ["物品", "商品", "发票内容", "货物", "货品", "商品名称", "item", "product", "内容", "品名"],
       invoice_date: ["开票时间", "开票日期", "开票日期时间"],
       apply_date: ["申请时间", "申请日期", "apply"],
@@ -70,6 +70,7 @@ let activeKeywords = null;     // 当前生效的 ROLE_KEYWORDS
 
 // ===== 注入到商家后台页面执行的提取函数（必须自包含）=====
 function extractTables(roleKeywords, fields) {
+  // 关键词匹配：返回 { role, score }（score=命中关键词长度，用于重复角色仲裁），或 null
   function matchRole(text, kw) {
     if (!text) return null;
     const t = text.toLowerCase();
@@ -77,19 +78,35 @@ function extractTables(roleKeywords, fields) {
     let bestScore = 0;
     for (const role in kw) {
       for (const k of kw[role]) {
-        if (t.indexOf(k.toLowerCase()) !== -1) {
-          if (k.length > bestScore) {
-            bestScore = k.length;
-            best = role;
-          }
+        const kk = k.toLowerCase();
+        if (kk && t.indexOf(kk) !== -1 && kk.length > bestScore) {
+          bestScore = kk.length;
+          best = role;
         }
       }
     }
-    return best;
+    return best ? { role: best, score: bestScore } : null;
+  }
+
+  // 判定一行单元格更像「数据」还是「表头」：
+  // 真实表头是短标签（订单号/状态…），不可能含完整日期、¥ 金额或长数字单号；
+  // 数据行命中任一特征即判定为数据。
+  function looksLikeDataRow(cells) {
+    let dateLike = 0, amountLike = 0, orderLike = 0;
+    cells.forEach((c) => {
+      const s = String(c || "").trim();
+      if (!s) return;
+      if (/\d{4}[-/年]\d{1,2}[-/月]\d{1,2}/.test(s)) { dateLike++; return; }
+      if (/[¥￥]/.test(s)) { amountLike++; return; }
+      if (/^(\d[\d\-]{7,})(\s|$)/.test(s.split(/\s+/)[0]) || /^\d{8,}$/.test(s.split(/\s+/)[0])) orderLike++;
+    });
+    return dateLike >= 1 || amountLike >= 1 || orderLike >= 1;
   }
 
   const tables = Array.from(document.querySelectorAll("table"));
-  const out = [];
+
+  // --- 第一遍：收集候选表（表头单元格 + 数据行）---
+  const candidates = [];
   tables.forEach((tbl, idx) => {
     const allRows = Array.from(tbl.querySelectorAll("tr"));
     if (!allRows.length) return;
@@ -109,18 +126,63 @@ function extractTables(roleKeywords, fields) {
       .map((r) => Array.from(r.querySelectorAll("th, td")).map((c) => c.innerText.replace(/\s+/g, " ").trim()))
       .filter((r) => r.length >= headerCells.length);
 
-    if (!rows.length) return;
+    candidates.push({ idx, headerCells, rows });
+  });
+
+  // --- 第二遍：合并「粘性表头」---
+  // 拼多多等后台会把真实表头单独渲染成一张无数据的表（idx 靠前），
+  // 数据表则没有 th，首行数据被误当表头。此处把两者拼回：
+  // 数据表首行像数据 + 存在列数一致的纯表头表 → 用真表头，且把误当表头的数据行放回数据。
+  const headerOnly = candidates.filter((c) => !c.rows.length && c.headerCells.length >= 3);
+  const usedHeader = new Set();
+  candidates.forEach((c) => {
+    if (!c.rows.length) return;
+    if (looksLikeDataRow(c.headerCells)) {
+      // 被误当「表头」的那一行本来就是数据，恢复进 rows
+      const origDataRow = c.headerCells.map((s) => String(s).replace(/\s+/g, " ").trim());
+      const h = headerOnly.find(
+        (x) => !usedHeader.has(x.idx) && x.headerCells.length === c.headerCells.length
+      );
+      if (h) {
+        c.headerCells = h.headerCells; // 用真表头
+        usedHeader.add(h.idx);
+        c.merged = true;
+      } else {
+        // 没有可合并的纯表头表：列名留空，后续靠内容嗅探识别角色
+        c.headerCells = c.headerCells.map(() => "");
+      }
+      c.rows.unshift(origDataRow);
+    }
+  });
+
+  // --- 第三遍：角色映射 + 内容嗅探 ---
+  const out = [];
+  candidates.forEach((c) => {
+    if (!c.rows.length) return;
+    const headers = c.headerCells;
+    const rows = c.rows;
 
     const roleMap = {};
     const autoRoles = [];
-    headerCells.forEach((hc, ci) => {
-      const role = matchRole(hc, roleKeywords);
-      roleMap[ci] = role;
-      if (role) autoRoles.push(ci);
+    // 重复角色仲裁：同一角色被多列命中时，保留命中关键词最长的那列
+    // （如「发票抬头」4 字胜过「抬头类型」命中的「抬头」2 字；「订单号」胜过「订单状态」的「订单」）
+    const byRole = {};
+    headers.forEach((hc, ci) => {
+      // 「承诺开票时间」是截止期限不是实际开票时间，明确忽略
+      const m = (hc && hc.indexOf("承诺") !== -1) ? null : matchRole(hc, roleKeywords);
+      if (m && (!byRole[m.role] || byRole[m.role].score < m.score)) {
+        byRole[m.role] = { ci, score: m.score };
+      }
+    });
+    headers.forEach((hc, ci) => {
+      const m = (hc && hc.indexOf("承诺") !== -1) ? null : matchRole(hc, roleKeywords);
+      if (m && byRole[m.role] && byRole[m.role].ci === ci) {
+        roleMap[ci] = m.role;
+        autoRoles.push(ci);
+      }
     });
 
     // --- 内容嗅探二次校验（表头常与内容不符，如「开票状态」列里是订单号）---
-    // 对一列取值统计特征：orderLike / amountLike / dateLike 的占比
     function sniff(vals) {
       const vs = vals.filter((v) => v != null && String(v).trim() !== "");
       if (vs.length < 2) return null;
@@ -142,7 +204,7 @@ function extractTables(roleKeywords, fields) {
     // 1) 已被表头映射为 invoice_date、但内容明显是订单号、且没有订单号列 → 纠正为 order_id
     const hasOrderCol = Object.values(roleMap).indexOf("order_id") !== -1;
     if (!hasOrderCol) {
-      headerCells.forEach((hc, ci) => {
+      headers.forEach((hc, ci) => {
         if (roleMap[ci] !== "invoice_date") return;
         const s = sniff(rows.slice(0, 30).map((r) => r[ci]));
         if (s === "order_id") {
@@ -151,8 +213,9 @@ function extractTables(roleKeywords, fields) {
       });
     }
     // 2) 表头没匹配上的列，按内容补角色（只补订单号/金额/日期三类高置信度特征）
-    headerCells.forEach((hc, ci) => {
+    headers.forEach((hc, ci) => {
       if (roleMap[ci]) return;
+      if (hc && hc.indexOf("承诺") !== -1) return; // 「承诺开票时间」非实际开票时间
       const s = sniff(rows.slice(0, 30).map((r) => r[ci]));
       if (s) {
         // 该角色已被占用则不抢
@@ -163,7 +226,7 @@ function extractTables(roleKeywords, fields) {
       }
     });
 
-    out.push({ idx, headers: headerCells, roleMap, autoRoles, rows, rowCount: rows.length });
+    out.push({ idx: c.idx, headers, roleMap, autoRoles, rows, rowCount: rows.length });
   });
   return { tables: out };
 }
