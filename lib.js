@@ -10,7 +10,7 @@
   "use strict";
 
   // 标准输出字段（顺序即导出列顺序）
-  // v2.2 新增：发票种类/发票类型/其他信息（开户行等）/订单状态/售后状态/物流信息
+  // v2.3 新增订单查询相关列：成交时间/数量/商品总价/收货信息/备注
   const FIELDS = [
     { key: "buyer_title", label: "发票抬头" },
     { key: "tax_no", label: "税号" },
@@ -20,13 +20,18 @@
     { key: "order_id", label: "订单号" },
     { key: "order_status", label: "订单状态" },
     { key: "after_sale", label: "售后状态" },
+    { key: "trans_time", label: "成交时间" },
+    { key: "qty", label: "数量" },
+    { key: "goods_total", label: "商品总价" },
+    { key: "amount", label: "金额" },
     { key: "tracking_no", label: "快递单号" },
     { key: "logistics", label: "物流信息" },
-    { key: "amount", label: "金额" },
+    { key: "ship_to", label: "收货信息" },
     { key: "items", label: "物品" },
     { key: "invoice_date", label: "开票时间" },
     { key: "apply_date", label: "申请时间" },
     { key: "buyer", label: "买家" },
+    { key: "remark", label: "备注" },
   ];
 
   // 把任意金额文本解析成数字（去掉 ¥、逗号、空格、货币符号等）

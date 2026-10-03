@@ -15,13 +15,18 @@ const PLATFORM_PRESETS = {
       order_id: ["订单号", "订单编号", "订单", "单号", "order", "no.", "编号"],
       order_status: ["订单/售后状态", "订单状态", "成交状态"],
       after_sale: ["售后状态", "售后"],
+      trans_time: ["成交时间", "下单时间", "交易时间"],
+      qty: ["数量", "件数"],
+      goods_total: ["商品总价", "商品总额"],
       tracking_no: ["快递单号", "物流单号", "运单号", "货运单号", "tracking", "waybill"],
       logistics: ["物流信息", "物流"],
-      amount: ["发票金额", "实收金额", "金额", "价税合计", "开票金额", "实付金额", "合计", "金额(元)", "amount", "price", "价税"],
+      amount: ["发票金额", "实收金额", "金额", "价税合计", "开票金额", "实付金额", "合计", "金额(元)", "商品总价(元)", "amount", "price", "价税"],
       items: ["商品信息", "商品名称", "物品", "商品", "发票内容", "货物", "货品", "宝贝标题", "item", "product", "内容", "品名"],
       invoice_date: ["开票时间", "开票日期", "开票日期时间"],
       apply_date: ["申请时间", "申请日期", "apply"],
       buyer: ["买家", "收货人", "购买方", "customer", "consignee", "收件人"],
+      ship_to: ["收货信息", "收货人", "收货地址"],
+      remark: ["备注", "用户备注", "买家留言", "操作/备注", "操作"],
     },
   },
   taobao: {
@@ -138,6 +143,19 @@ function extractTables(roleKeywords, fields) {
     candidates.push({ idx, headerCells, allCellRows: dataRows.map(cellTexts) });
   });
 
+  // --- 订单查询页检测（拼多多：每个订单 = 独立 table，首行合并「订单编号：…成交时间：…」）---
+  const orderTplCand = candidates.find(
+    (c) => !c.allCellRows.length &&
+      c.headerCells.some((h) => /商品信息/.test(h)) &&
+      c.headerCells.some((h) => /订单\/售后状态|订单状态/.test(h)) &&
+      c.headerCells.length >= 7
+  );
+  const orderTemplate = orderTplCand
+    ? orderTplCand.headerCells
+    : ["", "商品信息", "订单/售后状态", "数量", "商品总价(元)", "实收金额(元)", "收货信息", "买家", "操作/备注"];
+  const orderIdx = new Set(candidates.filter(isOrderTable).map((c) => c.idx));
+  const orderListMode = orderIdx.size > 0 && (orderTplCand != null || orderIdx.size >= 2);
+
   // --- 第二遍：合并「粘性表头」---
   // 拼多多等后台会把真实表头单独渲染成一张无数据的表（idx 靠前），
   // 数据表则没有 th，首行数据被误当表头。此处把两者拼回：
@@ -146,6 +164,11 @@ function extractTables(roleKeywords, fields) {
   const usedHeader = new Set();
   candidates.forEach((c) => {
     if (!c.allCellRows.length) return;
+    if (orderListMode && orderIdx.has(c.idx)) {
+      // 订单查询页：每张订单独立成表，跳过粘性表头合并，原样保留数据行
+      c.rows = c.allCellRows.map((r) => { const p = r.slice(); while (p.length < c.headerCells.length) p.push(""); return p; });
+      return;
+    }
     if (looksLikeDataRow(c.headerCells)) {
       // 被误当「表头」的那一行本来就是数据，恢复进 rows
       const origDataRow = c.headerCells.map((s) => String(s).replace(/\s+/g, " ").trim());
@@ -170,77 +193,128 @@ function extractTables(roleKeywords, fields) {
     });
   });
 
-  // --- 卡片式订单列表检测（拼多多订单查询页）---
-  // 结构：每个订单 = 一行跨列「订单号：xxx 复制 … 成交时间」
-  //      + 一行正常内容（商品信息/订单·售后状态/金额/收货信息…）
-  //      + 可选一行跨列「物流信息：中通快递 79037027548891 …」
-  function spanningOrderIdHits(rows) {
-    let hits = 0;
-    rows.forEach((cells) => {
-      if (cells.length <= 2 && /订单号[:：]/.test(cells.join(" "))) hits++;
-    });
-    return hits;
+  // --- 拼多多订单查询页：每张订单 = 独立 table ---
+  // 真实结构（诊断原文确认）：
+  //   ① 一张「纯表头模板表」（含 商品信息/订单·售后状态…，0 数据行）
+  //   ② 每个订单一张表：首行(合并单元格) = "订单编号：\n<单号>\n复制\n成交时间：<时间>"
+  //                        数据行 = [商品信息, 订单/售后状态, 数量, 商品总价, 实收金额, 收货信息, 买家, 操作/备注]
+  function isOrderTable(c) {
+    if (c.headerCells.length > 4) return false; // 订单表是合并的 2 列行，排除多列表头
+    const headText = (c.headerCells || []).join(" ");
+    return /订单编号[:：]/.test(headText);
   }
 
-  function isCardOrderList(c) {
-    const hits = spanningOrderIdHits(c.allCellRows);
-    if (hits >= 2) return true;
-    if (hits >= 1) {
-      const headerText = c.headerCells.join(" ");
-      return headerText.indexOf("商品信息") !== -1 || headerText.indexOf("订单") !== -1;
-    }
-    return false;
+  // 内容兜底分类（仅当数据行列数与模板对不齐时启用）
+  function classifyOrderCell(s) {
+    const t = String(s || "").trim();
+    if (!t) return null;
+    if (/ID:\s*\d+/.test(t) && /商品编码[:：]/.test(t)) return "items";
+    if (/^(已收货|已发货|待发货|待付款|已取消|交易关闭|已完成|退款中|已退款|待收货|已下单)$/.test(t)) return "order_status";
+    if (/^\*{2,}/.test(t)) return "ship_to";
+    if (/发起聊天$/.test(t)) return "buyer";
+    if (/查看详情|添加备注|修改备注|用户备注|买家留言|物流信息/.test(t)) return "op";
+    if (/^\d{1,6}$/.test(t)) return "qty";
+    if (/^\d+(\.\d{1,2})?$/.test(t)) return "amount";
+    return null;
+  }
+  function applyClassified(rec, role, val) {
+    const v = String(val).trim();
+    if (role === "items") { if (v) rec.items.push(v); }
+    else if (role === "order_status") { if (v) rec.order_status = v; }
+    else if (role === "qty") { if (/^\d+$/.test(v)) rec.qty = String(parseInt(rec.qty || "0", 10) + parseInt(v, 10)); }
+    else if (role === "amount") { if (v && !rec.amount) rec.amount = v; }
+    else if (role === "ship_to") { if (v) rec.ship_to = v; }
+    else if (role === "buyer") { if (v) rec.buyer = v; }
+    else if (role === "op") { rec._op = (rec._op ? rec._op + " " : "") + v; }
   }
 
-  // 把卡片式订单列表还原成「每订单一行」的标准记录
-  function buildCardTable(c, roleMap) {
-    const recs = [];
-    let cur = null;
-    function flush() {
-      if (cur && cur.order_id) recs.push(cur);
-      cur = null;
-    }
-    c.allCellRows.forEach((cells) => {
-      const text = cells.join(" ");
-      if (cells.length <= 2 && /订单号[:：]/.test(text)) {
-        flush();
-        cur = {};
-        const m = text.match(/订单号[:：]\s*([A-Za-z]*\d[\d\-]{5,})/);
-        if (m) cur.order_id = m[1];
+  // 把一张订单表解析成标准记录
+  function parseOrderTable(c, template) {
+    const headText = (c.headerCells || []).join("\n");
+    const oidM = headText.match(/订单编号[:：]\s*([A-Za-z]*\d[\d\-]{5,})/);
+    const oid = oidM ? oidM[1] : "";
+    if (!oid) return null;
+    const timeM = headText.match(/(?:成交时间|下单时间)[:：]\s*(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})/);
+    const transTime = timeM ? timeM[1] : "";
+
+    const tCols = template.map((s) => String(s).replace(/\s+/g, " ").trim());
+    const at = (label) => tCols.indexOf(label);
+    const idx = {
+      items: at("商品信息"),
+      status: at("订单/售后状态") >= 0 ? at("订单/售后状态") : at("订单状态"),
+      qty: at("数量"),
+      goods: at("商品总价(元)") >= 0 ? at("商品总价(元)") : at("商品总价"),
+      amt: at("实收金额(元)") >= 0 ? at("实收金额(元)") : at("实收金额"),
+      ship: at("收货信息"),
+      buyer: at("买家"),
+      op: at("操作/备注") >= 0 ? at("操作/备注") : at("操作"),
+    };
+
+    const rec = {
+      order_id: oid, order_status: "", after_sale: "", trans_time: transTime,
+      qty: "", goods_total: "", amount: "", tracking_no: "", logistics: "",
+      ship_to: "", items: [], buyer: "", remark: "", _op: "",
+    };
+
+    (c.allCellRows || []).forEach((row) => {
+      const n = row.length;
+      const map = {};
+      if (n === tCols.length - 1) {
+        for (let i = 0; i < n; i++) map[i + 1] = row[i];
+      } else if (n === tCols.length) {
+        for (let i = 0; i < n; i++) map[i] = row[i];
+      } else {
+        row.forEach((cell) => { const r = classifyOrderCell(cell); if (r) applyClassified(rec, r, cell); });
         return;
       }
-      if (cells.length <= 2 && /物流信息/.test(text)) {
-        if (cur) {
-          const courier = text.match(/([\u4e00-\u9fa5]{2,12}?(?:快递|物流|速运|货运|邮政))/);
-          const waybill = text.match(/(\d{8,})/);
-          if (waybill) cur.tracking_no = waybill[1];
-          if (courier || waybill) cur.logistics = (courier ? courier[1] : "") + (waybill ? " " + waybill[1] : "");
-        }
-        return;
-      }
-      if (cells.length >= 3 && cur) {
-        c.headerCells.forEach((hc, ci) => {
-          const role = roleMap[ci];
-          if (role && !cur[role]) cur[role] = cells[ci] || "";
-        });
-      }
+      const v = (i) => (map[i] != null ? String(map[i]).trim() : "");
+      const it = v(idx.items); if (it) rec.items.push(it);
+      const st = v(idx.status); if (st) rec.order_status = st;
+      const q = v(idx.qty); if (q && /^\d+$/.test(q)) rec.qty = String(parseInt(rec.qty || "0", 10) + parseInt(q, 10));
+      const g = v(idx.goods); if (g && !rec.goods_total) rec.goods_total = g;
+      const a = v(idx.amt); if (a && !rec.amount) rec.amount = a;
+      const s = v(idx.ship); if (s) rec.ship_to = s;
+      const b = v(idx.buyer); if (b) rec.buyer = b;
+      const o = v(idx.op); if (o) rec._op = o;
     });
-    flush();
-    if (!recs.length) return null;
-    // 输出列：订单号 + 有值的角色（固定优先顺序）
-    const seq = ["order_id", "items", "amount", "order_status", "after_sale", "buyer", "tracking_no", "logistics"];
-    const roleSeq = seq.filter((role) => recs.some((r) => r[role]));
-    if (roleSeq.indexOf("order_id") === -1) return null;
-    const headers = roleSeq.map((role) => labelOf[role] || role);
-    const outRoleMap = {};
-    roleSeq.forEach((role, i) => { outRoleMap[i] = role; });
-    const rows = recs.map((r) => roleSeq.map((role) => r[role] || ""));
-    return { idx: c.idx, headers, roleMap: outRoleMap, autoRoles: roleSeq.map((_, i) => i), rows, rowCount: rows.length, cardMode: true };
+
+    const op = rec._op || "";
+    if (/物流信息/.test(op)) rec.logistics = "可查(点物流信息)";
+    const ub = op.match(/用户备注[:：]\s*(\S+)/);
+    const bl = op.match(/买家留言[:：]\s*(\S+)/);
+    const parts = [];
+    if (ub) parts.push("用户备注：" + ub[1]);
+    if (bl) parts.push("买家留言：" + bl[1]);
+    rec.remark = parts.join("；");
+    if (/(售后|退款)/.test(rec.order_status + " " + op)) rec.after_sale = "有";
+    rec.items = rec.items.join(" | ");
+    return rec;
   }
 
-  // --- 第三遍：角色映射 + 内容嗅探 +（卡片式还原）---
+  // 把多张订单表解析出的记录合并成一张「订单查询」卡片表（写入汇总库按订单号去重）
+  function orderRecordsToCard(recs) {
+    const seq = [
+      "order_id", "order_status", "after_sale", "trans_time", "qty", "goods_total", "amount",
+      "tracking_no", "logistics", "ship_to", "items", "invoice_date", "apply_date",
+      "buyer_title", "tax_no", "invoice_kind", "invoice_type", "extra_info", "buyer", "remark",
+    ];
+    const headers = seq.map((k) => labelOf[k] || k);
+    const roleMap = {}; const autoRoles = [];
+    seq.forEach((k, i) => { roleMap[i] = k; autoRoles.push(i); });
+    const rows = recs.map((r) => seq.map((k) => (r[k] != null ? r[k] : "")));
+    return { idx: -1, title: "订单查询（已合并）", headers, roleMap, autoRoles, rows, rowCount: rows.length, cardMode: true, orderMode: true };
+  }
+
+  // --- 第三遍：角色映射 + 内容嗅探 +（订单查询页还原）---
   const out = [];
+  const orderRecords = [];
   candidates.forEach((c) => {
+    // 订单查询页：每张订单独立成表，直接解析为记录，跳过通用表头映射
+    if (orderListMode && orderIdx.has(c.idx)) {
+      const recs = parseOrderTable(c, orderTemplate);
+      if (recs) orderRecords.push(recs);
+      return;
+    }
     if (!c.rows || !c.rows.length) return;
     const headers = c.headerCells;
     const rows = c.rows;
@@ -309,17 +383,9 @@ function extractTables(roleKeywords, fields) {
       }
     });
 
-    // 3) 卡片式订单列表 → 还原为每订单一行
-    if (isCardOrderList(c)) {
-      const cardTable = buildCardTable(c, roleMap);
-      if (cardTable) {
-        out.push(cardTable);
-        return;
-      }
-    }
-
     out.push({ idx: c.idx, headers, roleMap, autoRoles, rows, rowCount: rows.length });
   });
+  if (orderRecords.length) out.push(orderRecordsToCard(orderRecords));
   return { tables: out };
 }
 
@@ -629,7 +695,8 @@ function renderTables(tables) {
 
     const head = document.createElement("div");
     head.className = "tc-head";
-    head.innerHTML = `<span class="tc-title">表 #${t.idx + 1}</span><span class="tc-info">${t.rowCount} 行 × ${t.headers.length} 列 · 自动识别 ${t.autoRoles.length} 列</span>`;
+    const titleText = t.title ? t.title : `表 #${t.idx + 1}`;
+    head.innerHTML = `<span class="tc-title">${titleText}</span><span class="tc-info">${t.rowCount} 行 × ${t.headers.length} 列 · 自动识别 ${t.autoRoles.length} 列</span>`;
     card.appendChild(head);
 
     const cols = document.createElement("div");
