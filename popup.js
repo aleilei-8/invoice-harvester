@@ -18,6 +18,7 @@ const PLATFORM_PRESETS = {
       trans_time: ["成交时间", "下单时间", "交易时间"],
       qty: ["数量", "件数"],
       goods_total: ["商品总价", "商品总额"],
+      courier: ["快递公司", "承运公司", "承运商", "物流公司", "快递"],
       tracking_no: ["快递单号", "物流单号", "运单号", "货运单号", "tracking", "waybill"],
       logistics: ["物流信息", "物流"],
       amount: ["发票金额", "实收金额", "金额", "价税合计", "开票金额", "实付金额", "合计", "金额(元)", "商品总价(元)", "amount", "price", "价税"],
@@ -228,19 +229,41 @@ function extractTables(roleKeywords, fields) {
     else if (role === "op") { rec._op = (rec._op ? rec._op + " " : "") + v; }
   }
 
-  // 从物流行文本提取「快递公司 + 快递单号」
-  // 真实样例（截图确认）：
-  //   物流信息：极兔速递 J1309616537749 复制 ✅您的快件已签收，签收人：【小江浔浔瑶台代收】…
-  //   物流信息：申通快递 773430693399235 复制 ✅已签收…
-  //   物流信息：中通快递 7901738059807 复制 ✅您的快件已送达…【芳哥：15062222167】…
-  // 注意：行文里还有电话号码（11位），所以运单号必须紧跟在快递公司名之后取，避免误抓电话。
+  // 从物流行文本提取「快递公司 + 快递单号」（分词扫描，支持分段物流）
+  // 真实样例（截图/诊断确认）：
+  //   物流信息：极兔速递 JT3169616537749 复制 ✅您的快件已签收…（江千红，17770199665）…
+  //   物流信息：中通快递 7901738059807 复制 ✅…【芳哥：15062222167】…
+  //   物流信息：集运仓🟢 消夷香（二段物流） 极兔速递HK JT0024585595081 复制 🟢包裹已从…出 2026-07-10 19:06:30
+  // 规则：
+  //   ① 按空白分词；快递公司 = 纯中文(2~10字)结尾为 快递/速运/速递/邮政/货运/物流 的词，
+  //      允许带 ≤6 位拉丁字母路由后缀（如「极兔速递HK」→ 展示「极兔速递」）；
+  //      「集运仓🟢」「消夷香（二段物流）」含 emoji/括号，不会误判为快递公司。
+  //   ② 运单号 = 快递公司词后第一个「字母数字混合且 ≥8 位」的词（必须含数字），
+  //      行内电话（11位纯数字但位置靠后）不会被误抓；时间戳（含 -/:）天然不匹配。
+  //   ③ 分段物流：扫描全行所有「快递公司→运单号」对，多段用「、」连接。
   function parseLogisticsRow(rec, rowText) {
-    const m = rowText.match(
-      /物流信息[:：]\s*([\u4e00-\u9fa5]{2,12}?(?:快递|速运|速递|物流|货运|邮政))\s*([A-Za-z0-9]{8,30})/
-    );
-    if (m) {
-      rec.logistics = m[1] + " " + m[2];
-      if (!rec.tracking_no) rec.tracking_no = m[2];
+    const text = String(rowText || "").replace(/物流信息[:：]/, " ");
+    const tokens = text.split(/\s+/).filter(Boolean);
+    const courierRe = /^([\u4e00-\u9fa5]{2,10}(?:快递|速运|速递|邮政|货运|物流))[A-Za-z]{0,6}$/;
+    const waybillRe = /^[A-Za-z0-9]{8,30}$/;
+    const couriers = [];
+    const waybills = [];
+    for (let i = 0; i < tokens.length; i++) {
+      const cm = tokens[i].match(courierRe);
+      if (!cm) continue;
+      for (let j = i + 1; j < tokens.length; j++) {
+        if (waybillRe.test(tokens[j]) && /\d/.test(tokens[j])) {
+          couriers.push(cm[1]);
+          waybills.push(tokens[j]);
+          break;
+        }
+        if (courierRe.test(tokens[j])) break; // 下一公司出现仍未见到单号，放弃本段
+      }
+    }
+    if (couriers.length) {
+      rec.courier = Array.from(new Set(couriers)).join("、");
+      rec.tracking_no = Array.from(new Set(waybills)).join("、");
+      if (!rec.logistics) rec.logistics = rec.courier + " " + rec.tracking_no;
     }
   }
 
@@ -268,7 +291,7 @@ function extractTables(roleKeywords, fields) {
 
     const rec = {
       order_id: oid, order_status: "", after_sale: "", trans_time: transTime,
-      qty: "", goods_total: "", amount: "", tracking_no: "", logistics: "",
+      qty: "", goods_total: "", amount: "", courier: "", tracking_no: "", logistics: "",
       ship_to: "", items: [], buyer: "", remark: "", _op: "",
     };
 
@@ -315,10 +338,10 @@ function extractTables(roleKeywords, fields) {
   }
 
   // 把多张订单表解析出的记录合并成一张「订单查询」卡片表（写入汇总库按订单号去重）
-  // 用户需求（v2.3.1）：订单页只抓 订单号 / 物品名称 / 物流信息（快递公司+快递单号），
-  // 其余（收货信息、买家、状态、金额等）不抓；导出时与发票页数据按订单号合并补齐。
+  // 用户需求（v2.4）：抓取 订单号 / 订单·售后状态 / 物品名称 / 快递公司 / 快递单号（分两列），
+  // 收货信息、买家等不抓；导出时与发票页数据按订单号合并补齐。
   function orderRecordsToCard(recs) {
-    const seq = ["order_id", "items", "tracking_no", "logistics"];
+    const seq = ["order_id", "order_status", "items", "courier", "tracking_no"];
     const headers = seq.map((k) => labelOf[k] || k);
     const roleMap = {}; const autoRoles = [];
     seq.forEach((k, i) => { roleMap[i] = k; autoRoles.push(i); });

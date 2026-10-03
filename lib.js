@@ -24,6 +24,7 @@
     { key: "qty", label: "数量" },
     { key: "goods_total", label: "商品总价" },
     { key: "amount", label: "金额" },
+    { key: "courier", label: "快递公司" },
     { key: "tracking_no", label: "快递单号" },
     { key: "logistics", label: "物流信息" },
     { key: "ship_to", label: "收货信息" },
