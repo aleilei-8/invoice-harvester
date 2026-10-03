@@ -157,45 +157,44 @@ function extractTables(roleKeywords, fields) {
   const orderIdx = new Set(candidates.filter(isOrderTable).map((c) => c.idx));
   const orderListMode = orderIdx.size > 0 && (orderTplCand != null || orderIdx.size >= 2);
 
-  // --- 表格外物流信息块采集 ---
-  // 真实 DOM（用户诊断确认）：拼多多订单页的物流行渲染在订单 <table> 之外的兄弟节点里，
-  // 订单表本身只有「订单编号行 + 商品行」两行（totalRows=2），表内扫描永远看不到物流。
-  // 此处全局扫描含「物流信息：」的表外元素，并按 DOM 顺序归属到它前面最近的订单表。
-  function collectOuterLogiBlocks() {
-    let els = [];
-    try { els = Array.from(document.querySelectorAll("div, span, p, li, section")); } catch (e) { return []; }
-    const matched = [];
-    els.forEach((el) => {
-      if (!el || !el.textContent) return;
-      if (el.closest && el.closest("table")) return;             // 表内物流行走原有解析路径
-      if (el.querySelector && el.querySelector("table")) return; // 含订单表的大容器跳过
-      const t = String(el.textContent).replace(/\s+/g, " ").trim();
-      if (!t || t.length > 800) return;                          // 页面级大容器跳过
-      if (/物流信息[:：]/.test(t)) matched.push(el);
-    });
-    // 去嵌套：父子都命中时只保留最外层（文本完整，避免重复归属）
-    return matched.filter((el) => !matched.some((o) => o !== el && o.contains && o.contains(el)));
+  // --- 表外物流信息配对（平面文本法，v2.5.1）---
+  // 真实 DOM（用户诊断确认）：拼多多订单页物流行渲染在订单 <table> 之外（totalRows=2），
+  // 且 v2.5 的「表外元素扫描」在真实页面上采不到任何块（诊断 outerLogi=[]，容器结构与假设不符）。
+  // 因此放弃 DOM 结构假设，改用 document.body.innerText 平面文本：
+  //   ① 按文本顺序列出所有「订单编号：xxx」出现位置；
+  //   ② 对每个「物流信息：」出现位置，归属到它前面最近的那个订单编号
+  //     （物流行在视觉上必然紧跟自己的订单，innerText 顺序 = 视觉顺序，天然正确）；
+  //   ③ 物流段文本截到下一个「物流信息」或「订单编号」为止（集运仓分段 = 同订单多段）。
+  function collectLogiFromBody() {
+    const map = {}; // orderId -> [物流段文本, ...]
+    let raw = "";
+    try { raw = (document.body && document.body.innerText) || ""; } catch (e) { return map; }
+    const txt = String(raw).replace(/\s+/g, " ");
+    if (!txt) return map;
+    const ids = [];
+    const idRe = /订单编号[:：]\s*([A-Za-z]*\d[\d\-]{5,})/g;
+    let m;
+    while ((m = idRe.exec(txt)) !== null) ids.push({ oid: m[1], pos: m.index });
+    if (!ids.length) return map;
+    const logiRe = /物流信息[:：]/g; // 注意：操作列按钮「物流信息」无冒号，不会误命中
+    while ((m = logiRe.exec(txt)) !== null) {
+      let cur = null;
+      for (let i = 0; i < ids.length; i++) {
+        if (ids[i].pos < m.index) cur = ids[i]; else break;
+      }
+      if (!cur) continue;
+      let end = txt.length;
+      const nl = txt.indexOf("物流信息", m.index + 5);
+      const ni = txt.indexOf("订单编号", m.index + 5);
+      if (nl !== -1) end = Math.min(end, nl);
+      if (ni !== -1) end = Math.min(end, ni);
+      const seg = txt.slice(m.index, end).trim();
+      if (seg) (map[cur.oid] = map[cur.oid] || []).push(seg);
+    }
+    return map;
   }
 
-  const logiByTableIdx = {};
-  if (orderIdx.size) {
-    const logiBlocks = collectOuterLogiBlocks();
-    // DOCUMENT_POSITION_FOLLOWING=4：b 在 a 之后
-    const following = (a, b) => !!(a && a.compareDocumentPosition && (a.compareDocumentPosition(b) & 4));
-    const orderEls = candidates
-      .filter((c) => orderIdx.has(c.idx) && tables[c.idx])
-      .map((c) => ({ key: c.idx, el: tables[c.idx] })); // candidates 按文档顺序构建
-    let cur = -1;
-    logiBlocks.forEach((el) => {
-      while (cur + 1 < orderEls.length && following(orderEls[cur + 1].el, el)) cur++;
-      if (cur >= 0 && following(orderEls[cur].el, el)) {
-        const key = orderEls[cur].key;
-        (logiByTableIdx[key] = logiByTableIdx[key] || []).push(
-          String(el.textContent).replace(/\s+/g, " ").trim()
-        );
-      }
-    });
-  }
+  const logiById = orderIdx.size ? collectLogiFromBody() : {};
 
   // --- 第二遍：合并「粘性表头」---
   // 拼多多等后台会把真实表头单独渲染成一张无数据的表（idx 靠前），
@@ -308,8 +307,8 @@ function extractTables(roleKeywords, fields) {
     }
   }
 
-  // 把一张订单表解析成标准记录（outerLogiTexts：归属到这张表的表外物流块文本）
-  function parseOrderTable(c, template, outerLogiTexts) {
+  // 把一张订单表解析成标准记录（logiById：订单号 -> [物流段文本]（表外平面文本配对结果））
+  function parseOrderTable(c, template, logiById) {
     const headText = (c.headerCells || []).join("\n");
     const oidM = headText.match(/订单编号[:：]\s*([A-Za-z]*\d[\d\-]{5,})/);
     const oid = oidM ? oidM[1] : "";
@@ -364,9 +363,10 @@ function extractTables(roleKeywords, fields) {
       const o = v(idx.op); if (o) rec._op = o;
     });
 
-    // 表外物流块（拼多多真实结构：物流行在 <table> 之外的兄弟节点；集运仓分段可能有多个块）
-    if (outerLogiTexts && outerLogiTexts.length) {
-      parseLogisticsRow(rec, outerLogiTexts.join("\n"));
+    // 表外物流段（按订单号精确配对；集运仓分段可能有多个段）
+    const outerSegs = logiById && logiById[oid];
+    if (outerSegs && outerSegs.length) {
+      parseLogisticsRow(rec, outerSegs.join("\n"));
     }
 
     const op = rec._op || "";
@@ -401,7 +401,7 @@ function extractTables(roleKeywords, fields) {
   candidates.forEach((c) => {
     // 订单查询页：每张订单独立成表，直接解析为记录，跳过通用表头映射
     if (orderListMode && orderIdx.has(c.idx)) {
-      const recs = parseOrderTable(c, orderTemplate, logiByTableIdx[c.idx]);
+      const recs = parseOrderTable(c, orderTemplate, logiById);
       if (recs) orderRecords.push(recs);
       return;
     }
@@ -1014,18 +1014,34 @@ function copyDiag() {
             : [];
           return { idx, totalRows: dataRows.length, headers, firstRow };
         });
-        // 表外物流块（订单页物流行在 table 之外时，诊断里直接可见原文）
-        const logiMatched = [];
-        document.querySelectorAll("div, span, p, li").forEach((el) => {
-          if (el.closest && el.closest("table")) return;
-          if (el.querySelector && el.querySelector("table")) return;
-          const t = (el.textContent || "").replace(/\s+/g, " ").trim();
-          if (t && t.length <= 800 && /物流信息[:：]/.test(t)) logiMatched.push(el);
-        });
-        const outerLogi = logiMatched
-          .filter((el) => !logiMatched.some((o) => o !== el && o.contains && o.contains(el)))
-          .map((el) => String(el.textContent).replace(/\s+/g, " ").trim().slice(0, 300))
-          .slice(0, 5);
+        // 表外物流配对（平面文本法：与抓取逻辑一致，直接验证「订单号→物流段」配对）
+        const logiMap = {};
+        try {
+          const txt = String((document.body && document.body.innerText) || "").replace(/\s+/g, " ");
+          const ids = [];
+          const idRe = /订单编号[:：]\s*([A-Za-z]*\d[\d\-]{5,})/g;
+          let mm;
+          while ((mm = idRe.exec(txt)) !== null) ids.push({ oid: mm[1], pos: mm.index });
+          const logiRe = /物流信息[:：]/g;
+          while ((mm = logiRe.exec(txt)) !== null) {
+            let cur = null;
+            for (let i = 0; i < ids.length; i++) {
+              if (ids[i].pos < mm.index) cur = ids[i]; else break;
+            }
+            if (!cur) continue;
+            let end = txt.length;
+            const nl = txt.indexOf("物流信息", mm.index + 5);
+            const ni = txt.indexOf("订单编号", mm.index + 5);
+            if (nl !== -1) end = Math.min(end, nl);
+            if (ni !== -1) end = Math.min(end, ni);
+            const seg = txt.slice(mm.index, end).trim();
+            if (seg) (logiMap[cur.oid] = logiMap[cur.oid] || []).push(seg);
+          }
+        } catch (e) { /* 忽略 */ }
+        const outerLogi = Object.keys(logiMap).slice(0, 5).map((oid) => ({
+          oid,
+          segs: logiMap[oid].map((s) => s.slice(0, 300)),
+        }));
         return { url: location.href, title: document.title, tables, outerLogi };
       },
     }, (res) => {
