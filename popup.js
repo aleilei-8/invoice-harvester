@@ -282,6 +282,8 @@ function readGrabState(tabId, sincePage, wantChunk) {
       running: !!g.running,
       done: !!g.done,
       page: g.page || 0,
+      curPage: g.curPage || 0,
+      totalPages: g.total || 0,
       note: g.note || "",
       lastClick: g.lastClick || "",
       mergedPage: g.mergedPage || 0,
@@ -289,6 +291,11 @@ function readGrabState(tabId, sincePage, wantChunk) {
       chunk: wc ? pages.filter((p) => p.page > from) : [],
     };
   }, [sincePage, !!wantChunk]);
+}
+
+// 请求页面内的抓取任务停止（抓完当前页后结束，已入库的页不丢）
+function requestStop(tabId) {
+  return injectOnce(tabId, () => { if (window.__IH_GRAB) window.__IH_GRAB.stop = true; }, []);
 }
 
 // 把「已入库到第几页」写回页面，避免弹窗重开后重复入库
@@ -322,13 +329,17 @@ async function grabAll() {
     if (st0 && st0.running) {
       log("检测到页面内已有抓取任务在运行，接管并继续入库（未重新启动循环）", "warn");
     } else {
-      log("开始抓取全部页：循环在页面内运行，**弹窗可以关闭**；每页抓完即入库去重");
+      log("开始抓取全部页：循环在页面内运行，**弹窗可以关闭**；进度显示在网页右上角浮层");
+      if (st0 && st0.curPage > 1) {
+        log(`注意：当前页面停在第 ${st0.curPage} 页，脚本会先自动回到第 1 页再开始抓`, "warn");
+      }
       $("status").textContent = "抓取全部页：启动中…";
       injectOnce(tab.id, grabAllInPage, [kw, FIELDS, MAX_PAGES]); // 长任务，不等待返回
       await sleep(600);
     }
+    $("btn-stop").hidden = false;
 
-    let totalAdded = 0, totalMerged = 0, totalRows = 0;
+    let totalAdded = 0, totalMerged = 0, totalRows = 0, lastCount = 0;
     let idleRounds = 0;
     for (let round = 0; round < 2400; round++) { // 最多轮询 ~60 分钟
       await sleep(1500);
@@ -345,6 +356,7 @@ async function grabAll() {
           totalRows += r.rows;
           lastPage = Math.max(lastPage, pg.page);
           lastTables = pg.tables;
+          lastCount = pg.tables.reduce((s, t) => s + t.rowCount, 0);
           renderTables(pg.tables);
           log(`第 ${pg.page} 页：新增 ${r.added}，合并 ${r.merged}（累计 ${totalRows} 行）`, "ok");
         }
@@ -354,7 +366,9 @@ async function grabAll() {
       } else {
         idleRounds++;
       }
-      $("status").textContent = `抓取中：已入库 ${lastPage} 页（页面正在处理第 ${st.page} 页）…弹窗可关闭`;
+      const pgTxt = st.curPage ? `第 ${st.curPage}${st.totalPages ? "/" + st.totalPages : ""} 页` : `第 ${st.page} 页`;
+      $("status").textContent = `抓取中：已入库 ${lastPage} 页 · ${pgTxt} · 进度浮层在网页右上角（弹窗可关闭）`;
+      $("grab-count").textContent = `本次抓取：${lastPage} 页 / ${lastCount} 行`;
       if (st.done) {
         const tail = st.note ? `（${st.note}）` : "";
         log(`全部页抓取完成：共 ${lastPage} 页，新增 ${totalAdded} 条，合并 ${totalMerged} 条${tail}`, "ok");
@@ -369,6 +383,7 @@ async function grabAll() {
   } finally {
     grabbingAll = false;
     $("btn-grab-all").disabled = false;
+    $("btn-stop").hidden = true;
   }
 }
 
@@ -683,7 +698,49 @@ function copyDiag() {
           }
           logiProbe.push({ idx, oid: om[1], domLen: found.length, domText: found.slice(0, 400) });
         });
-        return { url: location.href, title: document.title, outerLogi, logiProbe, tables };
+        // 分页器探针：确认「抓取全部页」能否识别分页条 / 自动回到第 1 页
+        // （与 pagefuncs.js 的 pagerInfo 同源逻辑，用于判断分页器没被识别时的真实结构）
+        let pager = null;
+        try {
+          const vis = (el) => !!(el && el.offsetParent !== null);
+          const numOf = (el) => { const t = String((el && el.innerText) || "").trim(); return /^\d{1,4}$/.test(t) ? parseInt(t, 10) : 0; };
+          const cands = Array.from(document.querySelectorAll("div, ul, ol, nav, section, span"));
+          let best = null;
+          for (const el of cands) {
+            if (el.closest && el.closest("table")) continue;
+            const kids = Array.from(el.children || []);
+            if (kids.length < 2 || kids.length > 40) continue;
+            const nums = kids.filter((k) => numOf(k) > 0 && vis(k));
+            if (nums.length < 2) continue;
+            const uniq = [];
+            nums.forEach((k) => { const n = numOf(k); if (uniq.indexOf(n) === -1) uniq.push(n); });
+            if (uniq.length < 2) continue;
+            const cc = String(el.className || "") + " " + String((el.parentElement && el.parentElement.className) || "");
+            const bonus = /pag|pager|page|PGT/i.test(cc) ? 20 : 0;
+            const score = bonus + uniq.length * 4 + nums.length - kids.length;
+            if (!best || score > best.score) best = { el, nums, uniq, score };
+          }
+          const body = String((document.body && document.body.innerText) || "").replace(/\s+/g, " ");
+          const cnt = body.match(/共\s*(?:有)?\s*[\d,]+\s*条[\s\S]{0,24}/);
+          if (best) {
+            const act = best.nums.filter((k) => {
+              const c = String(k.className || "");
+              return /(^|[^a-z])(active|current|selected|checked)([^a-z]|$)/i.test(c) ||
+                (k.getAttribute && k.getAttribute("aria-current") === "page");
+            })[0];
+            pager = {
+              containerTag: (best.el.tagName || ""),
+              containerClass: String(best.el.className || "").slice(0, 120),
+              pages: best.uniq.slice(0, 60),
+              current: act ? numOf(act) : 0,
+              currentClass: act ? String(act.className || "").slice(0, 80) : "",
+              countText: cnt ? cnt[0].trim() : "",
+            };
+          } else {
+            pager = { found: false, countText: cnt ? cnt[0].trim() : "" };
+          }
+        } catch (e) { pager = { err: String(e && e.message || e) }; }
+        return { url: location.href, title: document.title, pager, outerLogi, logiProbe, tables };
       },
     }, (res) => {
       const data = res && res[0] && res[0].result;
@@ -717,6 +774,13 @@ document.addEventListener("DOMContentLoaded", () => {
   $("btn-export-xlsx").addEventListener("click", exportXlsx);
   $("btn-diag").addEventListener("click", copyDiag);
   $("btn-clear").addEventListener("click", clearLib);
+  $("btn-stop").addEventListener("click", async () => {
+    const tab = await activeTab();
+    if (!tab) return;
+    await requestStop(tab.id);
+    log("已请求停止（抓完当前页后结束，已抓到的页已入库）", "warn");
+    $("status").textContent = "正在停止…";
+  });
   refreshLibCount();
   log("就绪。选择平台 → 打开对应商家后台发票/订单页 → 点「抓取本页」");
   // 弹窗重开时探测页面内是否还有任务在跑（弹窗可以关掉，任务在网页里继续）
@@ -726,8 +790,9 @@ document.addEventListener("DOMContentLoaded", () => {
     const st = await readGrabState(tab.id, 0, false);
     if (!st) return;
     if (st.running) {
-      $("status").textContent = `页面内抓取任务运行中：正在处理第 ${st.page} 页…`;
-      log(`检测到页面内抓取任务仍在运行（第 ${st.page} 页）——点「抓取全部页」可接管并继续入库`, "warn");
+      $("status").textContent = `页面内抓取任务运行中：第 ${st.curPage || st.page}${st.totalPages ? "/" + st.totalPages : ""} 页…`;
+      $("btn-stop").hidden = false;
+      log(`检测到页面内抓取任务仍在运行（第 ${st.curPage || st.page} 页）——点「抓取全部页」可接管并继续入库，「停止抓取」可中止`, "warn");
     } else if (st.done && st.total > st.mergedPage) {
       log(`页面内有 ${st.total - st.mergedPage} 页抓取结果尚未入库——点「抓取全部页」补入库`, "warn");
     }

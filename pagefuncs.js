@@ -539,8 +539,81 @@ function extractTables(roleKeywords, fields) {
   return { tables: out };
 }
 
+// ===== 注入：分页器识别（必须自包含）=====
+// 为什么必须「先定位分页器容器」：拼多多等自研分页器的真实形态（用户诊断截图确认）是
+//   ‹  1  18  19  20  21  22  ›        共有 436 条  每页 20 条
+// 若在全页面范围内找「纯数字元素」，数量列（1/3）、消息角标（17）、站内信（3）、时间片段
+// 都会被当成页码候选 → 点到无关元素 → 页面不变 → 循环误判结束（这是「抓全部页只抓到 1 页」的元凶之一）。
+// 因此先按「容器」结构定位分页条：一个不含 table 的容器，其直接子元素里有 ≥2 个互不相同的纯数字。
+function pagerInfo() {
+  const vis = (el) => !!(el && el.offsetParent !== null);
+  const numOf = (el) => {
+    const t = String((el && el.innerText) || "").trim();
+    return /^\d{1,4}$/.test(t) ? parseInt(t, 10) : 0;
+  };
+  let list = [];
+  try { list = Array.from(document.querySelectorAll("div, ul, ol, nav, section, span")); } catch (e) { list = []; }
+  let best = null;
+  for (const el of list) {
+    if (el.closest && el.closest("table")) continue; // 表格里的数字单元格不是分页器
+    const kids = Array.from(el.children || []);
+    if (kids.length < 2 || kids.length > 40) continue;
+    const nums = kids.filter((k) => numOf(k) > 0 && vis(k));
+    if (nums.length < 2) continue;
+    const uniq = [];
+    nums.forEach((k) => { const n = numOf(k); if (uniq.indexOf(n) === -1) uniq.push(n); });
+    if (uniq.length < 2) continue;
+    // 类名含 pag/pager/page/PGT 的容器优先（真实分页器几乎都带这类 class）
+    const cc = String(el.className || "") + " " + String((el.parentElement && el.parentElement.className) || "");
+    const bonus = /pag|pager|page|PGT/i.test(cc) ? 20 : 0;
+    const score = bonus + uniq.length * 4 + nums.length - kids.length;
+    if (!best || score > best.score) best = { el, nums, uniq, score };
+  }
+  if (!best) return null;
+  let cur = 0;
+  for (const k of best.nums) {
+    const c = String(k.className || "");
+    let aria = "";
+    try { aria = String((k.getAttribute && k.getAttribute("aria-current")) || ""); } catch (e) { aria = ""; }
+    if (/(^|[^a-z])(active|current|selected|checked)([^a-z]|$)/i.test(c) || aria === "page") {
+      cur = numOf(k);
+      break;
+    }
+  }
+  let total = 0;
+  best.uniq.forEach((n) => { if (n > total) total = n; });
+  // 总页数用「共有 N 条 / 每页 M 条」交叉校验（分页器被省略号截断时更准）
+  try {
+    const t = String((document.body && document.body.innerText) || "").replace(/\s+/g, " ");
+    const tm = t.match(/共\s*(?:有)?\s*([\d,]+)\s*条/);
+    const pm = t.match(/每页\s*(\d+)\s*条/);
+    if (tm && pm) {
+      const n = parseInt(String(tm[1]).replace(/[^\d]/g, ""), 10);
+      const per = parseInt(pm[1], 10);
+      if (n > 0 && per > 0) {
+        const calc = Math.ceil(n / per);
+        if (calc > total) total = calc;
+      }
+    }
+  } catch (e) { /* 忽略 */ }
+  return { el: best.el, nums: best.nums, pages: best.uniq, cur, total };
+}
+
+// 点击分页器里的指定页码（返回 { clicked, sel } 或 null；未识别到分页器时返回 null）
+function clickPageNumber(n) {
+  if (!n || n < 1) return null;
+  const p = pagerInfo();
+  if (!p) return null;
+  const t = String(n);
+  const el = p.nums.filter((k) => String((k.innerText || "")).trim() === t)[0];
+  if (!el) return null;
+  try { el.click(); } catch (e) { return null; }
+  return { clicked: true, sel: "pager-num:" + n };
+}
+
 // ===== 注入：点击「下一页」（必须自包含）=====
 // 多策略（电商后台分页器五花八门：antd / 自研 / 无限滚动）：
+//   ⓪ 分页器容器内优先：先点「目标页码（默认 当前页+1）」，再点容器内的「下一页」箭头
 //   ① 类名与语义属性（pagination-next / aria-label=下一页 …）
 //   ② 文本「下一页 / › / »」
 //   ③ 点「当前激活页码 + 1」（自研分页器图标点击无效时最可靠）
@@ -559,6 +632,8 @@ function clickNextPage(targetPage) {
     try { el.click(); } catch (e) { return null; }
     return { clicked: true, sel: tag };
   };
+  let allCands = [];
+  try { allCands = Array.from(document.querySelectorAll("button, a, li, span, i, div")); } catch (e) { allCands = []; }
 
   // ① 类名 / 语义属性
   const sels = [
@@ -571,6 +646,33 @@ function clickNextPage(targetPage) {
     "button[aria-label*=下一页]", "a[aria-label*=下一页]",
     "[title*=下一页]", "[aria-label*=Next i]", "[title*=Next i]",
   ];
+
+  // ⓪ 分页器容器内优先（最精确：不会点到表格里的数量/角标数字）
+  let pg = null;
+  try { pg = pagerInfo(); } catch (e) { pg = null; }
+  if (pg) {
+    const want = (targetPage && targetPage > 1) ? targetPage : (pg.cur > 0 ? pg.cur + 1 : 0);
+    if (want) {
+      const w = String(want);
+      const numEl = pg.nums.filter((k) => String((k.innerText || "")).trim() === w)[0];
+      const rNum = numEl ? hit(numEl, "pager-num:" + want) : null;
+      if (rNum) return rNum;
+    }
+    for (const s of sels) {
+      let l = [];
+      try { l = Array.from(pg.el.querySelectorAll(s)); } catch (e) { l = []; }
+      for (const el of l) { const r = hit(el, "pager:" + s); if (r) return r; }
+    }
+    for (const t of ["下一页", "下页", "后一页", "›", "»", ">"]) {
+      for (const el of allCands) {
+        if (pg.el.contains && !pg.el.contains(el)) continue;
+        if (String(el.innerText || "").trim() !== t) continue;
+        const r = hit(el, "pager:text:" + t);
+        if (r) return r;
+      }
+    }
+  }
+
   for (const s of sels) {
     let list = [];
     try { list = Array.from(document.querySelectorAll(s)); } catch (e) { continue; }
@@ -581,9 +683,7 @@ function clickNextPage(targetPage) {
   }
 
   // ② 文本兜底
-  const cands = Array.from(document.querySelectorAll(
-    "button, a, li, span, i, div"
-  ));
+  const cands = allCands;
   for (const t of ["下一页", "下页", "后一页", "›", "»", ">"]) {
     for (const el of cands) {
       if ((el.innerText || "").trim() !== t) continue;
@@ -652,27 +752,130 @@ function pageSignature() {
 
 // 暴露给「页面内长任务」使用（注入到目标页面的隔离世界里）
 if (typeof window !== "undefined") {
-  window.__IH_PAGE = { extractTables, clickNextPage, pageSignature };
+  window.__IH_PAGE = { extractTables, clickNextPage, pageSignature, pagerInfo, clickPageNumber };
 }
 
 // ===== 页面内长任务：自动翻页抓取全部页（自包含）=====
 // 由 popup 注入到商家后台页面执行，进度与结果挂在 window.__IH_GRAB：
-//   { running, page, done, note, pages: [{ page, tables }] }
+//   { running, page, curPage, total, done, note, lastClick, pages: [{ page, tables }] }
 // 为什么放在页面里跑：拼多多一页要等 1~3 秒，22 页要几分钟，
 // 而浏览器弹窗一旦失焦就被关闭 → 原来跑在弹窗里的循环会被打断，只抓到第 1 页。
 // 跑在页面内则弹窗关掉也能继续；popup 只需轮询 window.__IH_GRAB 增量入库。
+// v2.7 两处关键修复：
+//   ① 开抓前先确认自己在第 1 页。用户常常停在中间页/最后一页（诊断截图：停在 22/22），
+//      循环从当前页往后翻自然只剩 1 页 → 这正是「抓全部页却只抓到 1 页」的真正原因。
+//   ② 页面右上角加进度浮层：弹窗失焦被关闭后用户仍能看到进度，并可随时「停止抓取」。
 async function grabAllInPage(roleKeywords, fields, maxPages) {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  const G = { running: true, page: 0, done: false, note: "", pages: [] };
+  const G = { running: true, page: 0, curPage: 0, total: 0, done: false, note: "", lastClick: "", pages: [], stop: false };
   try { window.__IH_GRAB = G; } catch (e) { /* 忽略 */ }
+  const OV_ID = "__ih_grab_overlay";
+  const escHtml = (s) => String(s == null ? "" : s).replace(/[&<>]/g, (c) => (c === "&" ? "&amp;" : (c === "<" ? "&lt;" : "&gt;")));
+
+  // ---- 页面内进度浮层（挂到 documentElement，与 body 同级，不污染 body.innerText）----
+  function ovEnsure() {
+    let el = null;
+    try { el = document.getElementById(OV_ID); } catch (e) { el = null; }
+    if (el) return el;
+    try {
+      el = document.createElement("div");
+      el.id = OV_ID;
+      el.setAttribute("style", [
+        "position:fixed", "z-index:2147483647", "right:18px", "top:18px", "width:316px",
+        "box-sizing:border-box", "padding:13px 15px", "border-radius:12px",
+        "background:#0f1a2e", "color:#e9f0ff", "text-align:left",
+        "font:13px/1.7 -apple-system,BlinkMacSystemFont,'Microsoft YaHei',sans-serif",
+        "box-shadow:0 12px 34px rgba(0,0,0,.45)", "border:1px solid rgba(122,170,255,.4)"
+      ].join(";"));
+      const host = document.documentElement || document.body;
+      if (!host || !host.appendChild) return null;
+      host.appendChild(el);
+    } catch (e) { return null; }
+    return el;
+  }
+  function ovRemove() {
+    try {
+      const el = document.getElementById(OV_ID);
+      if (!el) return;
+      if (el.remove) el.remove();
+      else if (el.parentNode) el.parentNode.removeChild(el);
+    } catch (e) { /* 忽略 */ }
+  }
+  function ovPaint(cur, total, count, method, finalNote) {
+    const el = ovEnsure();
+    if (!el) return;
+    const curTxt = cur > 0 ? String(cur) : "?";
+    const totalTxt = total > 0 ? String(total) : "?";
+    const pct = total > 0 && cur > 0 ? Math.min(100, Math.round((cur / total) * 100)) : 0;
+    const bar = '<div style="height:6px;border-radius:4px;background:rgba(255,255,255,.14);overflow:hidden;margin:8px 0 6px">'
+      + '<div style="height:100%;width:' + pct + '%;background:linear-gradient(90deg,#4c8cff,#39d3b4)"></div></div>';
+    const head = finalNote
+      ? '<div style="font-weight:600;color:#39d3b4">抓取结束</div>'
+      : '<div style="font-weight:600">电商订单信息助手 · 抓取全部页</div>';
+    const mid = '<div>已抓 <b style="color:#ffd66b">' + count + '</b> 页 · 当前第 <b>' + curTxt + '</b> / ' + totalTxt + ' 页</div>';
+    const tip = method ? '<div style="opacity:.7;font-size:12px">翻页方式：' + escHtml(method) + '</div>' : '';
+    const note = finalNote ? '<div style="margin-top:3px;color:#ffd66b">' + escHtml(finalNote) + '</div>' : '';
+    const btns = finalNote
+      ? '<div style="margin-top:9px"><button data-ih-close style="cursor:pointer;border:0;border-radius:6px;padding:5px 12px;background:#2b3b57;color:#dce8ff;font-size:12px">关闭</button></div>'
+      : '<div style="margin-top:9px"><button data-ih-stop style="cursor:pointer;border:0;border-radius:6px;padding:5px 12px;background:#3a2b3f;color:#ffd0d0;font-size:12px">停止抓取</button></div>';
+    el.innerHTML = head + mid + bar + tip + note + btns;
+    try {
+      const sb = el.querySelector("[data-ih-stop]");
+      if (sb) sb.addEventListener("click", function () { G.stop = true; });
+      const cb = el.querySelector("[data-ih-close]");
+      if (cb) cb.addEventListener("click", function () { ovRemove(); });
+    } catch (e) { /* 忽略 */ }
+  }
+  // 等页面真的换页并渲染稳定：先等签名变化，再等连续两次签名一致
+  async function waitChange(before) {
+    for (let i = 0; i < 30; i++) { // 最多 15 秒
+      await sleep(500);
+      const s = P.pageSignature();
+      if (s && s !== before) {
+        let prev = "";
+        for (let k = 0; k < 20; k++) {
+          await sleep(300);
+          const s2 = P.pageSignature();
+          if (s2 && s2 === prev) return true;
+          prev = s2;
+        }
+        return true;
+      }
+    }
+    return false;
+  }
+
   const P = window.__IH_PAGE;
   if (!P || typeof P.extractTables !== "function") {
     G.running = false; G.done = true; G.note = "页面函数库未注入";
     return { ok: false, note: G.note };
   }
+  const limit = maxPages || 200;
   try {
-    const limit = maxPages || 200;
+    // ---- ① 读分页器：拿到「当前页 / 总页数」 ----
+    let info = null;
+    try { info = typeof P.pagerInfo === "function" ? P.pagerInfo() : null; } catch (e) { info = null; }
+    if (info) { G.curPage = info.cur || 0; G.total = info.total || 0; }
+
+    // ---- ② 不在第 1 页 → 先回第 1 页 ----
+    if (info && info.cur > 1) {
+      ovPaint(info.cur, info.total, 0, "", "当前停在第 " + info.cur + " 页，正在回到第 1 页…");
+      const beforeBack = P.pageSignature();
+      const back = typeof P.clickPageNumber === "function" ? P.clickPageNumber(1) : null;
+      if (back && back.clicked) {
+        await waitChange(beforeBack);
+      } else {
+        G.note = "无法回到第 1 页（分页条里没有可点的「1」），将从当前第 " + info.cur + " 页开始";
+      }
+      let i2 = null;
+      try { i2 = typeof P.pagerInfo === "function" ? P.pagerInfo() : null; } catch (e) { i2 = null; }
+      if (i2) { G.curPage = i2.cur || G.curPage; G.total = i2.total || G.total; }
+    }
+    ovPaint(G.curPage, G.total, 0, "");
+
+    // ---- ③ 逐页抓取 ----
     for (let page = 1; page <= limit; page++) {
+      if (G.stop) { G.note = G.note || "已手动停止"; break; }
       G.page = page;
       // 提取（翻页后偶发空表 → 重试，避免误判为最后一页）
       let data = null;
@@ -682,34 +885,41 @@ async function grabAllInPage(roleKeywords, fields, maxPages) {
         await sleep(1000);
       }
       if (!data || !data.tables || !data.tables.length) {
-        G.note = "第 " + page + " 页未识别到表格";
+        G.note = "第 " + page + " 页（页面第 " + (G.curPage || "?") + " 页）未识别到表格";
         break;
       }
       G.pages.push({ page: page, tables: data.tables });
-      // 翻页
+      ovPaint(G.curPage || page, G.total, G.pages.length, G.lastClick);
+
+      // ---- ④ 翻页：优先按「分页器当前页码 + 1」作为绝对目标 ----
+      let cur = 0, total = G.total, i3 = null;
+      try { i3 = typeof P.pagerInfo === "function" ? P.pagerInfo() : null; } catch (e) { i3 = null; }
+      if (i3) { cur = i3.cur || 0; if (i3.total) total = i3.total; }
+      if (cur) G.curPage = cur;
+      if (total) G.total = total;
+      if (total && cur && cur >= total) { G.note = "已到最后一页（共 " + total + " 页）"; break; }
+      const target = cur > 0 ? cur + 1 : page + 1;
       const before = P.pageSignature();
-      const clicked = P.clickNextPage(page + 1);
+      const clicked = P.clickNextPage(target);
       if (!clicked || !clicked.clicked) {
         G.note = "没有下一页了" + (clicked && clicked.reason ? "（" + clicked.reason + "）" : "");
         break;
       }
       G.lastClick = clicked.sel;
-      // 等内容变化（最多 15 秒）
-      let changed = false;
-      for (let i = 0; i < 30; i++) {
-        await sleep(500);
-        const s = P.pageSignature();
-        if (s && s !== before) { changed = true; break; }
-      }
+      ovPaint(G.curPage || page, G.total, G.pages.length, G.lastClick);
+      const changed = await waitChange(before);
       if (!changed) {
         G.note = "翻页后页面未变化（方式：" + clicked.sel + "）";
         break;
       }
     }
+    if (G.stop && !G.note) G.note = "已手动停止";
   } catch (e) {
     G.note = "异常：" + (e && e.message ? e.message : String(e));
   }
   G.running = false;
   G.done = true;
-  return { ok: true, page: G.page, total: G.pages.length, note: G.note };
+  ovPaint(G.curPage || G.page, G.total, G.pages.length, G.lastClick, G.note || ("已抓取 " + G.pages.length + " 页"));
+  sleep(12000).then(ovRemove); // 完成提示 12 秒后自动消失（也可点「关闭」）
+  return { ok: true, page: G.page, curPage: G.curPage, total: G.pages.length, note: G.note };
 }

@@ -409,6 +409,18 @@ if (res.tables[0]) {
 }
 
 // ================================================================
+// ================================================================
+// v2.7：clickNextPage 会调用同文件的 pagerInfo / clickPageNumber（脚本作用域）。
+// 用 new Function 抽出来的函数只能看到「全局作用域」，因此先把它们挂到 global 上，
+// 等价于浏览器里 pagefuncs.js 作为整份脚本加载后的作用域关系。
+const piSrc = src.match(/function pagerInfo\(\) \{[\s\S]*?\n\}/);
+const cpnSrc = src.match(/function clickPageNumber\(n\) \{[\s\S]*?\n\}/);
+check("找到 pagerInfo / clickPageNumber 源码", !!piSrc && !!cpnSrc);
+const pagerInfoFn = piSrc ? new Function("return (" + piSrc[0] + ");")() : null;
+const clickPageNumberFn = cpnSrc ? new Function("return (" + cpnSrc[0] + ");")() : null;
+global.pagerInfo = pagerInfoFn;
+global.clickPageNumber = clickPageNumberFn;
+
 console.log("[J] 翻页控件识别：next 类名 / 激活页码+1 / 禁用跳过 / 滚动兜底");
 const cnpSrc = src.match(/function clickNextPage\(targetPage\) \{[\s\S]*?\n\}/);
 if (!cnpSrc) { check("J 找到 clickNextPage 源码", false); }
@@ -453,6 +465,81 @@ else {
   const r3 = clickNextPage(2);
   check("J ③ 禁用 next 被跳过、未点击", eNextDis.clicked === false);
   check("J ③ 退化为滚动兜底", r3.clicked === true && r3.sel === "scroll");
+}
+
+// ================================================================
+console.log("[L] 分页器识别（v2.7 修「抓全部页只抓到 1 页」的核心）");
+function mkPager(current, pages, cls) {
+  const kids = pages.map((n) => ({
+    innerText: String(n),
+    className: (cls || "PGT-item") + (n === current ? " PGT-active" : ""),
+    tagName: "LI", offsetParent: {}, clicked: false,
+    click() { this.clicked = true; },
+    getAttribute() { return null; },
+    closest() { return null; },
+  }));
+  const arrow = {
+    innerText: "›", className: "PGT-next", tagName: "LI", offsetParent: {}, clicked: false,
+    click() { this.clicked = true; }, getAttribute() { return null; }, closest() { return null; },
+  };
+  const box = {
+    tagName: "UL", className: "PGT-pagination", children: kids.concat([arrow]),
+    parentElement: null,
+    querySelectorAll(sel) {
+      if (sel === "*") return kids.concat([arrow]);
+      if (/next/i.test(sel)) return [arrow];
+      return [];
+    },
+    contains(x) { return x === arrow || kids.indexOf(x) !== -1; },
+  };
+  kids.concat([arrow]).forEach((k) => { k.parentElement = box; });
+  return { box, kids, arrow };
+}
+// 干扰项：表格数量列里的「2」——旧实现（全页面找数字）会误点它
+function decoy(text, cls) {
+  return {
+    innerText: text, className: cls || "cell", tagName: "TD", offsetParent: {}, clicked: false,
+    click() { this.clicked = true; }, getAttribute() { return null; }, closest() { return null; },
+  };
+}
+function setPagerDoc(box, extraCands, bodyText) {
+  global.document = {
+    querySelectorAll(sel) {
+      if (sel === "div, ul, ol, nav, section, span") return box ? [box] : [];
+      if (sel === "button, a, li, span, i, div") return extraCands || [];
+      return [];
+    },
+    body: { innerText: bodyText || "", scrollHeight: 100 },
+    scrollingElement: { scrollTop: 0, scrollHeight: 100 },
+  };
+  global.window = { scrollTo() {} };
+}
+const clickNextPageL = cnpSrc ? new Function("return (" + cnpSrc[0] + ");")() : null;
+if (pagerInfoFn && clickPageNumberFn && clickNextPageL) {
+  // ① 用户截图真实形态：停在最后一页，分页条 = ‹ 1 18 19 20 21 22 ›
+  const p22 = mkPager(22, [1, 18, 19, 20, 21, 22]);
+  const decoy2 = decoy("2");
+  setPagerDoc(p22.box, [decoy2], "订单编号：260708-334286067311450 数量 2 已收货 共有 436 条 每页 20 条");
+  const info22 = pagerInfoFn();
+  check("L ① 识别到分页器容器", !!info22);
+  check("L ① 当前页 = 22（按激活 class 判定）", info22 && info22.cur === 22);
+  check("L ① 总页数 = 22（页码最大值 +「共有 436 条 / 每页 20 条」交叉校验）", info22 && info22.total === 22);
+  check("L ① 页码列表 = 1,18,19,20,21,22", info22 && info22.pages.join(",") === "1,18,19,20,21,22");
+  const back1 = clickPageNumberFn(1);
+  check("L ① 「回到第 1 页」点中分页器里的 1", back1 && back1.sel === "pager-num:1" && p22.kids[0].clicked === true);
+
+  // ② 停在第 1 页：点「下一页」必须在分页器内点 2，不能点到表格里的数字 2
+  const p1 = mkPager(1, [1, 2, 3, 4, 5, 22]);
+  const decoy2b = decoy("2");
+  setPagerDoc(p1.box, [decoy2b], "共有 436 条 每页 20 条");
+  const rNext = clickNextPageL(2);
+  check("L ② 分页器内点中目标页码 2", rNext && rNext.clicked === true && rNext.sel === "pager-num:2" && p1.kids[1].clicked === true);
+  check("L ② 未误点表格里的数字 2（旧实现的元凶）", decoy2b.clicked === false);
+
+  // ③ 非分页器页面：不得凭空造出一个分页器
+  setPagerDoc(null, [decoy("1"), decoy("2")], "共有 3 条 每页 20 条");
+  check("L ③ 无分页条时 pagerInfo() 返回 null（不误判）", pagerInfoFn() === null);
+  check("L ③ 无分页条时 clickPageNumber() 返回 null", clickPageNumberFn(1) === null);
 }
 
 // ================================================================
@@ -516,6 +603,63 @@ console.log("[K] 页面内抓取循环（grabAllInPage）：逐页抓取 / 末�
     global.window = {};
     const r5 = await grabAllInPage({}, [], 200);
     check("K 页面函数库未注入 → 明确报错", r5.ok === false && r5.note.indexOf("未注入") !== -1);
+
+    // ============================================================
+    console.log("[M] v2.7：停在中/末页时自动回到第 1 页并抓满全部（修「只抓到 1 页」）");
+    function setPagedEnv(startAt, TOTAL) {
+      let cur = startAt;
+      global.window = {
+        __IH_PAGE: {
+          extractTables: () => ({ tables: [{ headers: ["订单号"], rows: [["P" + cur]], rowCount: 1 }] }),
+          pageSignature: () => "sig" + cur,
+          pagerInfo: () => ({ cur: cur, total: TOTAL, pages: [], nums: [] }),
+          clickPageNumber: (n) => {
+            if (n < 1 || n > TOTAL) return null;
+            cur = n;
+            return { clicked: true, sel: "pager-num:" + n };
+          },
+          clickNextPage: (t) => {
+            if (t > TOTAL) return { clicked: false, reason: "最后一页" };
+            cur = t;
+            return { clicked: true, sel: "pager-num:" + t };
+          },
+        },
+      };
+    }
+    setPagedEnv(22, 22);
+    const rM1 = await grabAllInPage({}, [], 200);
+    check("M 停在最后一页（22/22）启动 → 自动回到第 1 页并抓满 22 页", rM1.total === 22);
+    check("M 抓取顺序为 1..22", window.__IH_GRAB.pages.map((p) => p.tables[0].rows[0][0]).join(",") ===
+      Array.from({ length: 22 }, (_, i) => "P" + (i + 1)).join(","));
+    check("M 末页自动停止并记录原因", rM1.note.indexOf("已到最后一页") !== -1);
+    check("M 总页数已记录到状态", window.__IH_GRAB.total === 22);
+
+    setPagedEnv(11, 22);
+    const rM2 = await grabAllInPage({}, [], 200);
+    check("M 停在中间页（11/22）启动 → 同样抓满 22 页", rM2.total === 22);
+    check("M 中间页启动也从第 1 页开始", window.__IH_GRAB.pages[0].tables[0].rows[0][0] === "P1");
+
+    setPagedEnv(1, 22);
+    const rM0 = await grabAllInPage({}, [], 200);
+    check("M 本来就在第 1 页 → 正常抓满 22 页", rM0.total === 22);
+
+    // 手动停止：浮层「停止抓取」/ 弹窗「停止抓取」按钮 → G.stop
+    let curS = 1;
+    global.window = {
+      __IH_PAGE: {
+        extractTables: () => ({ tables: [{ headers: ["订单号"], rows: [["Q"]], rowCount: 1 }] }),
+        pageSignature: () => "sig" + curS,
+        pagerInfo: () => ({ cur: curS, total: 99, pages: [], nums: [] }),
+        clickPageNumber: () => null,
+        clickNextPage: (t) => {
+          curS = t;
+          if (window.__IH_GRAB && window.__IH_GRAB.pages.length >= 3) window.__IH_GRAB.stop = true;
+          return { clicked: true, sel: "next" };
+        },
+      },
+    };
+    const rM3 = await grabAllInPage({}, [], 200);
+    check("M 支持手动停止（停止后立即结束并记录原因）", rM3.note.indexOf("手动停止") !== -1 && rM3.total === 3);
   }
   global.setTimeout = realST;
   console.log("\n" + (fail === 0 ? "ALL TESTS PASSED ✅" : fail + " TEST(S) FAILED ❌"));
