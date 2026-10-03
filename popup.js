@@ -740,7 +740,44 @@ function copyDiag() {
             pager = { found: false, countText: cnt ? cnt[0].trim() : "" };
           }
         } catch (e) { pager = { err: String(e && e.message || e) }; }
-        return { url: location.href, title: document.title, pager, outerLogi, logiProbe, tables };
+        // 翻页候选探针（v2.8）：把「抓取全部页」实际会尝试点哪些元素、点不点得动全打出来。
+        // 万一翻页仍失败，回传这一段就能精确定位：是「认错了元素」还是「元素被遮挡/不可点」。
+        let pagerClick = null;
+        try {
+          const P = window.__IH_PAGE;
+          if (!P || typeof P.pagerCandidates !== "function") {
+            pagerClick = { injected: false, hasPage: !!P };
+          } else {
+            const info = P.pagerInfo ? P.pagerInfo() : null;
+            const target = info && info.cur ? info.cur + 1 : 2;
+            const cs = P.pagerCandidates(target);
+            pagerClick = {
+              injected: true,
+              target: target,
+              count: cs.length,
+              cands: cs.slice(0, 12).map((c) => {
+                const el = c.el;
+                let rect = null, hitTag = "", hitClass = "";
+                try {
+                  const r = el.getBoundingClientRect();
+                  rect = [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height)];
+                  const top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+                  if (top) { hitTag = top.tagName || ""; hitClass = String(top.className || "").slice(0, 60); }
+                } catch (e) { /* 忽略 */ }
+                return {
+                  sel: c.sel,
+                  tag: el.tagName || "",
+                  cls: String(el.className || "").slice(0, 80),
+                  text: String(el.innerText || "").replace(/\s+/g, " ").slice(0, 24),
+                  rect: rect,
+                  clickable: (typeof P.elClickable === "function") ? P.elClickable(el) : null,
+                  topAtCenter: hitTag ? (hitTag + "." + hitClass) : "",
+                };
+              }),
+            };
+          }
+        } catch (e) { pagerClick = { err: String(e && e.message || e) }; }
+        return { url: location.href, title: document.title, pager, pagerClick, outerLogi, logiProbe, tables };
       },
     }, (res) => {
       const data = res && res[0] && res[0].result;

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "电商订单信息助手",
-  "version": "2.7.0",
+  "version": "2.8.0",
   "description": "通用浏览器插件：在拼多多/淘宝/京东/抖音等电商商家后台抓取订单与开票信息（订单号/物品/订单状态/快递公司/快递单号/发票抬头/税号/金额），支持自动翻页全量采集，本地汇总去重，一键导出 Excel。无需开放平台资质，装上即用。",
   "permissions": ["activeTab", "scripting", "storage"],
   "host_permissions": [

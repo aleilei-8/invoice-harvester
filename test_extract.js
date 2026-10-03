@@ -421,6 +421,19 @@ const clickPageNumberFn = cpnSrc ? new Function("return (" + cpnSrc[0] + ");")()
 global.pagerInfo = pagerInfoFn;
 global.clickPageNumber = clickPageNumberFn;
 
+// v2.8：clickNextPage / goToNextPage 还会用到这几个函数（同样只能看到全局作用域）
+const isnSrc = src.match(/function isDisabled\(el\) \{[\s\S]*?\n\}/);
+const ecSrc = src.match(/function elClickable\(el\) \{[\s\S]*?\n\}/);
+const ceSrc = src.match(/function clickEl\(el, mode\) \{[\s\S]*?\n\}/);
+const pcSrc = src.match(/function pagerCandidates\(targetPage\) \{[\s\S]*?\n\}/);
+const gnpSrc = src.match(/async function goToNextPage\(targetPage, beforeSig, onTry\) \{[\s\S]*?\n\}/);
+check("找到 isDisabled / elClickable / clickEl / pagerCandidates / goToNextPage 源码",
+  !!isnSrc && !!ecSrc && !!ceSrc && !!pcSrc && !!gnpSrc);
+global.isDisabled = isnSrc ? new Function("return (" + isnSrc[0] + ");")() : null;
+global.elClickable = ecSrc ? new Function("return (" + ecSrc[0] + ");")() : null;
+global.clickEl = ceSrc ? new Function("return (" + ceSrc[0] + ");")() : null;
+global.pagerCandidates = pcSrc ? new Function("return (" + pcSrc[0] + ");")() : null;
+
 console.log("[J] 翻页控件识别：next 类名 / 激活页码+1 / 禁用跳过 / 滚动兜底");
 const cnpSrc = src.match(/function clickNextPage\(targetPage\) \{[\s\S]*?\n\}/);
 if (!cnpSrc) { check("J 找到 clickNextPage 源码", false); }
@@ -661,6 +674,101 @@ console.log("[K] 页面内抓取循环（grabAllInPage）：逐页抓取 / 末�
     const rM3 = await grabAllInPage({}, [], 200);
     check("M 支持手动停止（停止后立即结束并记录原因）", rM3.note.indexOf("手动停止") !== -1 && rM3.total === 3);
   }
+
+  // ============================================================
+  console.log("[N] v2.8 翻页一体化（goToNextPage）：候选逐个点击 + 逐个验证");
+  // v2.7 的致命假设是「点一下就认为翻页成功」——用户实测浮层显示
+  // 「翻页方式：pager:li[class*="next"]」但页面纹丝不动，循环却当作抓完继续跑。
+  // 这里用假分页条验证新逻辑：点不动的候选必须继续试下一个，全点不动就必须判失败。
+  // （isDisabled / elClickable / clickEl / pagerCandidates 的源码抽取与挂载见上方 [J] 段）
+  if (gnpSrc && global.pagerCandidates && global.elClickable && global.clickEl) {
+    const goToNextPage = new Function("return (" + gnpSrc[0] + ");")();
+
+    // 假分页条：‹ 1 … 18 19 20 21 22 ›（真实截图形态）。只有 works 里列出的点击才「生效」
+    function mkBox(o) {
+      const st = { cur: o.cur, log: [] };
+      const kids = [];
+      const mkEl = (text, cls, kind) => ({
+        innerText: text, className: cls, tagName: "LI", offsetParent: {},
+        clicked: 0, nextElementSibling: null,
+        click() {
+          this.clicked++;
+          st.log.push(kind);
+          if (o.works && o.works.indexOf(kind) !== -1) {
+            st.cur = kind.indexOf("num:") === 0 ? parseInt(kind.slice(4), 10) : st.cur + 1;
+            kids.forEach((k) => { k.className = "PGT-item" + (String(k.innerText) === String(st.cur) ? " PGT-active" : ""); });
+          }
+        },
+        getAttribute() { return null; },
+        closest() { return null; },
+      });
+      const items = o.pages.map((n) => ({ t: String(n), c: "PGT-item" + (n === o.cur ? " PGT-active" : ""), k: "num:" + n }));
+      if (o.ellipsis) items.splice(1, 0, { t: "…", c: "PGT-ellipsis", k: "ellipsis" });
+      items.forEach((it) => kids.push(mkEl(it.t, it.c, it.k)));
+      const arrows = (o.arrows || [{ cls: "PGT-next", k: "arrow" }]).map((a) => mkEl("›", a.cls, a.k));
+      const all = kids.concat(arrows);
+      for (let i = 0; i < all.length - 1; i++) all[i].nextElementSibling = all[i + 1];
+      const box = {
+        tagName: "UL", className: "PGT-pagination", children: all, parentElement: null,
+        querySelectorAll(sel) {
+          if (sel === "*") return all;
+          if (/next/i.test(sel)) return all.filter((e) => /next/.test(String(e.className || "")));
+          return [];
+        },
+        contains(x) { return all.indexOf(x) !== -1; },
+      };
+      all.forEach((e) => { e.parentElement = box; });
+      return { box: box, st: st, kids: kids, arrows: arrows };
+    }
+    function setNDoc(pk) {
+      setPagerDoc(pk.box, [], "共有 436 条 每页 20 条");
+      global.window = { scrollTo() {}, __IH_PAGE: { pageSignature: () => "sig" + pk.st.cur, pagerInfo: pagerInfoFn } };
+    }
+
+    // ① 目标页不在页码窗口内（1 … 18..22）→ 只能点箭头；箭头有效 → 成功
+    const b1 = mkBox({ cur: 1, pages: [1, 18, 19, 20, 21, 22], ellipsis: true, works: ["arrow"] });
+    setNDoc(b1);
+    const rN1 = await goToNextPage(2, "sig1");
+    check("N ① 目标页不在页码窗口内 → 点箭头成功", rN1.clicked === true && /pager/.test(rN1.sel) && b1.arrows[0].clicked === 1);
+
+    // ② 目标页在窗口内 → 首选精确点页码，且不去碰箭头
+    const b2 = mkBox({ cur: 1, pages: [1, 2, 3, 4, 5], works: ["num:2"] });
+    setNDoc(b2);
+    const rN2 = await goToNextPage(2, "sig1");
+    check("N ② 窗口内有目标页码 → 首选点页码 2", rN2.clicked === true && rN2.sel === "pager-num:2");
+    check("N ② 命中后不再多余点击箭头", b2.arrows[0].clicked === 0);
+    check("N ② 记录到实际页码（不再产生错页告警）", rN2.page === 2 && rN2.mismatch === false);
+
+    // ③ 所有候选都点不动 → 必须判失败（v2.7 的 bug：点了没反应也报成功继续跑）
+    const b3 = mkBox({ cur: 1, pages: [1, 18, 19, 20, 21, 22], ellipsis: true, works: [] });
+    setNDoc(b3);
+    const rN3 = await goToNextPage(2, "sig1");
+    check("N ③ 点不动的候选不算成功（不虚报翻页成功）", rN3.clicked === false);
+    check("N ③ 失败原因明确 + 记录尝试过的候选", /未变化|都试过/.test(rN3.reason) && rN3.tried.length >= 1);
+    check("N ③ 箭头确实被点过（不是没点就报错）", b3.arrows[0].clicked >= 1);
+
+    // ④ 已经停在目标页 → 绝不再点（否则会连翻两页、整页漏抓）
+    const b4 = mkBox({ cur: 2, pages: [1, 2, 3, 4, 5], works: ["num:3"] });
+    setNDoc(b4);
+    const rN4 = await goToNextPage(2, "sig2");
+    check("N ④ 已在目标页 → 直接成功且不做任何点击", rN4.clicked === true && /^already/.test(rN4.sel) && b4.arrows[0].clicked === 0);
+
+    // ⑤ 禁用的箭头必须跳过，改点后面那个真的
+    const b5 = mkBox({
+      cur: 1, pages: [1, 18, 19, 20, 21, 22], ellipsis: true, works: ["arrow"],
+      arrows: [{ cls: "PGT-next disabled", k: "arrowDisabled" }, { cls: "PGT-next", k: "arrow" }],
+    });
+    setNDoc(b5);
+    const rN5 = await goToNextPage(2, "sig1");
+    check("N ⑤ 禁用箭头被跳过（未点击）", b5.arrows[0].clicked === 0);
+    check("N ⑤ 跳过禁用项后命中真箭头", rN5.clicked === true && b5.arrows[1].clicked === 1);
+    check("N ⑤ 诊断里记录了 skipped", rN5.tried.join("|").indexOf("skipped") !== -1);
+
+    // ⑥ 没有分页条、没有箭头 → 不许凭空造候选（防误点表格里的数字）
+    setPagerDoc(null, [], "共有 3 条 每页 20 条");
+    check("N ⑥ 无分页条无箭头 → 候选为空", pagerCandidates(2).length === 0);
+  }
+
   global.setTimeout = realST;
   console.log("\n" + (fail === 0 ? "ALL TESTS PASSED ✅" : fail + " TEST(S) FAILED ❌"));
   process.exit(fail === 0 ? 0 : 1); // 必须放在异步块内，否则会在异步测试跑完前退出

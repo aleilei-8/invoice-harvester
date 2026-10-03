@@ -611,110 +611,255 @@ function clickPageNumber(n) {
   return { clicked: true, sel: "pager-num:" + n };
 }
 
-// ===== 注入：点击「下一页」（必须自包含）=====
-// 多策略（电商后台分页器五花八门：antd / 自研 / 无限滚动）：
-//   ⓪ 分页器容器内优先：先点「目标页码（默认 当前页+1）」，再点容器内的「下一页」箭头
-//   ① 类名与语义属性（pagination-next / aria-label=下一页 …）
-//   ② 文本「下一页 / › / »」
-//   ③ 点「当前激活页码 + 1」（自研分页器图标点击无效时最可靠）
-//   ④ 跳页输入框填目标页码（targetPage 由调用方维护）
-//   ⑤ 滚动到底（兼容无限滚动）
-// 返回 { clicked, sel }；全部失败返回 { clicked:false, reason }
-function clickNextPage(targetPage) {
-  const visible = (el) => !!(el && el.offsetParent !== null);
-  const disabled = (el) =>
-    /(^|\s)(disabled|ant-pagination-disabled)/.test(String(el.className || "")) ||
-    el.getAttribute("aria-disabled") === "true" ||
-    el.disabled === true ||
-    (el.closest && el.closest("[disabled]"));
-  const hit = (el, tag) => {
-    if (!el || !visible(el) || disabled(el)) return null;
-    try { el.click(); } catch (e) { return null; }
-    return { clicked: true, sel: tag };
+// ===== 注入：元素可点性判定 + 点击执行（必须自包含）=====
+// v2.8 核心：v2.7 的「点一下就认为翻页成功」在真实后台不成立——用户实测浮层显示
+// 「翻页方式：pager:li[class*="next"]」但页面纹丝不动。三大原因：
+//   ① 命中的元素被装饰层/遮罩盖住，el.click() 到不了真正的按钮；
+//   ② handler 绑在 <li> 内部的 <a>/<span> 上，点 <li> 无效；
+//   ③ 少数自研组件只认完整鼠标事件序列（pointerdown→mousedown→…→click）。
+// 对策：候选元素按可靠度排序 → 逐个点击 → 每个点完等页面「真的换了页」才算成功。
+
+// 是否禁用：class 含 disabled/disable（兼容 PGT-next-disabled / xxx_disabled）
+// 或带 aria-disabled / disabled 属性，或近 4 层祖先带禁用类
+function isDisabled(el) {
+  if (!el) return true;
+  if (/disabled|disable|unclickable/i.test(String(el.className || ""))) return true;
+  try {
+    if (el.getAttribute && el.getAttribute("aria-disabled") === "true") return true;
+    if (el.hasAttribute && el.hasAttribute("disabled")) return true;
+  } catch (e) { /* 忽略 */ }
+  if (el.disabled === true) return true;
+  try {
+    let p = el.parentElement || null, n = 0;
+    while (p && n++ < 4) {
+      if (/disabled|disable/i.test(String(p.className || ""))) return true;
+      p = p.parentElement || null;
+    }
+  } catch (e) { /* 忽略 */ }
+  return false;
+}
+
+// 是否「看起来能点」：非禁用 + 有尺寸 + 计算样式没被隐藏
+// 拿不到样式信息时（老浏览器 / 单元测试的假 DOM）一律放行，只在明确不可点时拒绝
+function elClickable(el) {
+  if (!el) return false;
+  if (isDisabled(el)) return false;
+  try {
+    const cs = (typeof window !== "undefined" && window.getComputedStyle) ? window.getComputedStyle(el) : null;
+    if (cs) {
+      if (cs.display === "none" || cs.visibility === "hidden") return false;
+      if (parseFloat(cs.opacity || "1") === 0) return false;
+      if (cs.pointerEvents === "none") return false;
+    }
+  } catch (e) { /* 忽略 */ }
+  try {
+    if (el.getBoundingClientRect) {
+      const r = el.getBoundingClientRect();
+      if (r && (r.width < 2 || r.height < 2)) return false;
+    }
+  } catch (e) { /* 忽略 */ }
+  return true;
+}
+
+// 执行一次点击：mode="native" 用原生 click（真人点的其实是最内层那个元素），
+// mode="events" 额外补发完整鼠标事件序列。两种情况都优先点「中心坐标处最顶层的元素」
+function clickEl(el, mode) {
+  if (!el) return false;
+  const doClick = (t) => {
+    if (!t) return;
+    if (mode === "events") {
+      try {
+        const r = t.getBoundingClientRect ? t.getBoundingClientRect() : { left: 0, top: 0, width: 0, height: 0 };
+        const cx = r.left + (r.width || 0) / 2, cy = r.top + (r.height || 0) / 2;
+        const o = { bubbles: true, cancelable: true, view: window, clientX: cx, clientY: cy, button: 0 };
+        if (t.dispatchEvent) {
+          const mk = (type, Ctor, extra) => {
+            try { return new Ctor(type, Object.assign({}, o, extra || {})); } catch (e) { return null; }
+          };
+          if (typeof PointerEvent === "function") {
+            const pd = mk("pointerdown", PointerEvent, { pointerId: 1, pointerType: "mouse", isPrimary: true, buttons: 1 });
+            if (pd) t.dispatchEvent(pd);
+          }
+          const md = mk("mousedown", MouseEvent, { buttons: 1 });
+          if (md) t.dispatchEvent(md);
+          const mu = mk("mouseup", MouseEvent, { buttons: 0 });
+          if (mu) t.dispatchEvent(mu);
+          if (typeof PointerEvent === "function") {
+            const pu = mk("pointerup", PointerEvent, { pointerId: 1, pointerType: "mouse", isPrimary: true, buttons: 0 });
+            if (pu) t.dispatchEvent(pu);
+          }
+          const ck = mk("click", MouseEvent, { buttons: 0 });
+          if (ck) t.dispatchEvent(ck);
+        }
+      } catch (e) { /* 忽略 */ }
+    }
+    if (typeof t.click === "function") {
+      try { t.click(); } catch (e) { /* 忽略 */ }
+    } else if (t.dispatchEvent) {
+      try { t.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window })); } catch (e) { /* 忽略 */ }
+    }
   };
-  let allCands = [];
-  try { allCands = Array.from(document.querySelectorAll("button, a, li, span, i, div")); } catch (e) { allCands = []; }
+  let target = null;
+  try {
+    if (el.getBoundingClientRect && document.elementFromPoint) {
+      const r = el.getBoundingClientRect();
+      if (r && r.width > 0 && r.height > 0) {
+        const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+        if (hit && hit !== el && !(el.contains && el.contains(hit))) target = hit;
+      }
+    }
+  } catch (e) { /* 忽略 */ }
+  if (!target && el.querySelector) {
+    try { target = el.querySelector('a, button, [role="button"], svg, i, span'); } catch (e) { target = null; }
+  }
+  doClick(target || el);
+  return true;
+}
 
-  // ① 类名 / 语义属性
-  const sels = [
-    ".ant-pagination-next",
-    "[class*=pagination] [class*=next]",
-    "[class*=pager] [class*=next]",
-    "[class*=page] [class*=next]",
-    "li[class*=next]", "button[class*=next]", "a[class*=next]",
-    "div[class*=next]", "span[class*=next]", "i[class*=next]",
-    "button[aria-label*=下一页]", "a[aria-label*=下一页]",
-    "[title*=下一页]", "[aria-label*=Next i]", "[title*=Next i]",
-  ];
-
-  // ⓪ 分页器容器内优先（最精确：不会点到表格里的数量/角标数字）
+// 生成「翻到目标页」的候选元素，按可靠度从高到低：
+//   ① 分页条内文本 == 目标页码（最精确：点中就是那一页）
+//   ② 当前页 li 往后的第一个非省略号兄弟（结构位置最贴近分页器真实逻辑）
+//   ③ 分页条内 next 类名/属性元素
+//   ④ 分页条内箭头文本元素（含其父 li：handler 有时绑在父级）
+//   ⑤ 全局 next 类名/属性
+//   ⑥ 全局箭头文本
+//   ⑦ 全局「激活页码 + 1」（无分页条容器时的兜底）
+//   ⑧ 分页条内「最后一个非页码/非省略号元素」（位置启发式兜底）
+function pagerCandidates(targetPage) {
+  const out = [];
+  const seen = [];
+  const push = (el, sel, exact) => {
+    if (!el || seen.indexOf(el) !== -1) return;
+    seen.push(el);
+    out.push({ el: el, sel: sel, exact: !!exact });
+  };
+  const q = (root, s) => {
+    try { return (root && root.querySelectorAll) ? Array.prototype.slice.call(root.querySelectorAll(s)) : []; } catch (e) { return []; }
+  };
+  const txt = (el) => String((el && (el.innerText != null ? el.innerText : el.textContent)) || "").replace(/\s+/g, "");
+  const arrowTexts = ["下一页", "下页", "后一页", "›", "»", "❯", "→", ">"];
+  const isEllipsis = (t) => !t || t === "..." || t === "…" || t === "•••" || t === "···";
   let pg = null;
   try { pg = pagerInfo(); } catch (e) { pg = null; }
   if (pg) {
-    const want = (targetPage && targetPage > 1) ? targetPage : (pg.cur > 0 ? pg.cur + 1 : 0);
-    if (want) {
-      const w = String(want);
-      const numEl = pg.nums.filter((k) => String((k.innerText || "")).trim() === w)[0];
-      const rNum = numEl ? hit(numEl, "pager-num:" + want) : null;
-      if (rNum) return rNum;
+    const cur = pg.cur || 0;
+    const want = (targetPage && targetPage > 1) ? targetPage : (cur > 0 ? cur + 1 : 0);
+    const w = String(want);
+    for (const k of pg.nums) { if (txt(k) === w) push(k, "pager-num:" + want, true); }
+    let curEl = null;
+    for (const k of pg.nums) { if (cur > 0 && txt(k) === String(cur)) { curEl = k; break; } }
+    if (curEl) {
+      let sib = curEl.nextElementSibling || null, g = 0;
+      while (sib && g++ < 8) {
+        const t = txt(sib);
+        if (!isEllipsis(t)) {
+          if (/^\d{1,4}$/.test(t)) { if (want && parseInt(t, 10) === want) push(sib, "pager-sib-num:" + t, true); }
+          else push(sib, "pager-sib:" + t.slice(0, 4), false);
+          break;
+        }
+        sib = sib.nextElementSibling || null;
+      }
     }
-    for (const s of sels) {
-      let l = [];
-      try { l = Array.from(pg.el.querySelectorAll(s)); } catch (e) { l = []; }
-      for (const el of l) { const r = hit(el, "pager:" + s); if (r) return r; }
+    const pgSels = ['[class*="next"]', '[class*="Next"]', '[class*="arrow-right"]', '[class*="forward"]', "[aria-label*=下一页]", "[title*=下一页]", "[aria-label*=Next]", "[title*=Next]"];
+    for (const s of pgSels) {
+      for (const el of q(pg.el, s)) push(el, "pager:" + s, false);
     }
-    for (const t of ["下一页", "下页", "后一页", "›", "»", ">"]) {
-      for (const el of allCands) {
-        if (pg.el.contains && !pg.el.contains(el)) continue;
-        if (String(el.innerText || "").trim() !== t) continue;
-        const r = hit(el, "pager:text:" + t);
-        if (r) return r;
+    for (const el of q(pg.el, "li, a, button, span, i, div, svg")) {
+      const t = txt(el);
+      if (arrowTexts.indexOf(t) === -1) continue;
+      push(el, "pager-text:" + t, false);
+      if (el.parentElement) push(el.parentElement, "pager-text-parent:" + t, false);
+    }
+    if (!out.length) {
+      const kids = [];
+      try { kids = Array.prototype.slice.call(pg.el.children || []); } catch (e) { kids = []; }
+      for (let i = kids.length - 1; i >= 0; i--) {
+        const t = txt(kids[i]);
+        if (isEllipsis(t) || /^\d{1,4}$/.test(t)) continue;
+        push(kids[i], "pager-last:" + t.slice(0, 4), false);
+        break;
       }
     }
   }
-
-  for (const s of sels) {
-    let list = [];
-    try { list = Array.from(document.querySelectorAll(s)); } catch (e) { continue; }
-    for (const el of list) {
-      const r = hit(el, s);
-      if (r) return r;
+  const globSels = [".ant-pagination-next", '[class*="pagination"] [class*="next"]', '[class*="pager"] [class*="next"]', "li[class*=next]", "button[class*=next]", "a[class*=next]", "[aria-label*=下一页]", "[title*=下一页]"];
+  for (const s of globSels) {
+    for (const el of q(document, s)) push(el, s, false);
+  }
+  for (const t of ["下一页", "下页", "后一页", "›", "»", "❯"]) {
+    for (const el of q(document, "a, button, li, span, i")) {
+      if (txt(el) !== t) continue;
+      push(el, "text:" + t, false);
+      if (el.parentElement) push(el.parentElement, "text-parent:" + t, false);
     }
   }
-
-  // ② 文本兜底
-  const cands = allCands;
-  for (const t of ["下一页", "下页", "后一页", "›", "»", ">"]) {
-    for (const el of cands) {
-      if ((el.innerText || "").trim() !== t) continue;
-      const r = hit(el, "text:" + t);
-      if (r) return r;
-    }
-  }
-
-  // ③ 当前激活页码 + 1
-  const numEls = cands.filter((el) => /^\d{1,4}$/.test((el.innerText || "").trim()) && visible(el));
-  const active = numEls.find((el) => {
+  const numsAll = q(document, "button, a, li, span, i, div").filter((el) => /^\d{1,4}$/.test(txt(el)));
+  const act = numsAll.filter((el) => {
     const c = String(el.className || "");
-    return /(^|[^a-z])(active|current|selected|checked|on)([^a-z]|$)/i.test(c) ||
-      el.getAttribute("aria-current") === "page" ||
-      el.getAttribute("aria-selected") === "true";
-  });
-  if (active) {
-    const n = parseInt((active.innerText || "").trim(), 10);
-    const nxt = numEls.find((el) => parseInt((el.innerText || "").trim(), 10) === n + 1);
-    const r = hit(nxt, "page+" + n);
-    if (r) return r;
+    let aria = "";
+    try { aria = String((el.getAttribute && el.getAttribute("aria-current")) || ""); } catch (e) { aria = ""; }
+    return /(^|[^a-z])(active|current|selected|checked|on)([^a-z]|$)/i.test(c) || aria === "page";
+  })[0];
+  if (act) {
+    const n = parseInt(txt(act), 10);
+    const nx = numsAll.filter((el) => parseInt(txt(el), 10) === n + 1)[0];
+    push(nx, "page+" + n, true);
   }
+  return out;
+}
 
-  // ④ 跳页输入框（排除「每页条数」类输入框）
+// ===== 注入：翻到目标页（一体化：候选逐个点击 + 逐个验证）=====
+// 这是修「翻页无效」的关键函数：不再「点一下就认为成功」，而是
+//   候选排序 → 每个候选点一次 → 等最多 ~2.4 秒看页面是否真的换了页 → 没换就试下一个。
+// 这样即使命中错元素 / 被遮挡 / 需要完整事件序列，只要候选表里有「真能用的那个」就能翻过去。
+// 返回 { clicked, sel, page, mismatch, tried, reason }
+async function goToNextPage(targetPage, beforeSig, onTry) {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const P = (typeof window !== "undefined" && window.__IH_PAGE) || null;
+  const tried = [];
+  if (!P) return { clicked: false, sel: "", reason: "页面函数库未注入", tried: tried };
+  const sig = () => { try { return P.pageSignature ? P.pageSignature() : ""; } catch (e) { return ""; } };
+  const curOf = () => { try { const i = P.pagerInfo ? P.pagerInfo() : null; return i && i.cur ? i.cur : 0; } catch (e) { return 0; } };
+  const base = beforeSig != null ? beforeSig : sig();
+  const tell = (label) => { if (typeof onTry === "function") { try { onTry(label); } catch (e) { /* 忽略 */ } } };
+  if (targetPage && curOf() === targetPage) return { clicked: true, sel: "already:" + targetPage, page: targetPage, tried: tried };
+  const cands = pagerCandidates(targetPage);
+  const rounds = [
+    { mode: "native", max: 6, label: "" },
+    { mode: "events", max: 3, label: "（事件序列）" }
+  ];
+  for (const rd of rounds) {
+    let n = 0;
+    for (const c of cands) {
+      if (n >= rd.max) break;
+      if (!elClickable(c.el)) { tried.push(c.sel + ":skipped"); continue; }
+      if (targetPage && curOf() === targetPage) return { clicked: true, sel: "already:" + targetPage, page: targetPage, tried: tried };
+      n++;
+      clickEl(c.el, rd.mode);
+      tried.push(c.sel + rd.label);
+      tell(c.sel + rd.label);
+      let moved = false;
+      for (let k = 0; k < 6; k++) {
+        await sleep(400);
+        const s = sig();
+        if (s && s !== base) { moved = true; break; }
+      }
+      if (moved) {
+        const page = curOf();
+        return { clicked: true, sel: c.sel + rd.label, page: page, mismatch: !!(targetPage && page && page !== targetPage), tried: tried };
+      }
+    }
+  }
   if (targetPage && targetPage > 1) {
-    const inputs = Array.from(document.querySelectorAll("input")).filter((el) => {
-      if (!visible(el)) return false;
-      const hint = String(el.placeholder || "") + " " + String(el.getAttribute("aria-label") || "") + " " + String(el.className || "");
-      if (/每页|条\s*\/|size|limit|pageSize/i.test(hint)) return false;
-      return /跳|页码|page|jump/i.test(hint);
-    });
+    const inputs = [];
+    try {
+      Array.prototype.slice.call(document.querySelectorAll("input")).forEach((el) => {
+        if (!elClickable(el)) return;
+        const hint = String(el.placeholder || "") + " " + String((el.getAttribute && el.getAttribute("aria-label")) || "") + " " + String(el.className || "");
+        if (/每页|条\s*\/|size|limit|pageSize/i.test(hint)) return;
+        if (!/跳|页码|page|jump|go/i.test(hint)) return;
+        inputs.push(el);
+      });
+    } catch (e) { /* 忽略 */ }
     for (const inp of inputs) {
       try {
         const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
@@ -725,20 +870,72 @@ function clickNextPage(targetPage) {
         ["keydown", "keypress", "keyup"].forEach((ev) =>
           inp.dispatchEvent(new KeyboardEvent(ev, { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true }))
         );
-        return { clicked: true, sel: "jump-input:" + targetPage };
+        tried.push("jump-input:" + targetPage);
+        tell("跳页输入框:" + targetPage);
+        for (let k = 0; k < 6; k++) {
+          await sleep(400);
+          const s = sig();
+          if (s && s !== base) return { clicked: true, sel: "jump-input:" + targetPage, page: curOf(), tried: tried };
+        }
       } catch (e) { /* 继续尝试 */ }
     }
   }
+  try {
+    tried.push("scroll");
+    tell("滚动到底");
+    window.scrollTo(0, (document.body && document.body.scrollHeight) || 999999);
+    const sc = document.scrollingElement;
+    if (sc) sc.scrollTop = sc.scrollHeight;
+    for (let k = 0; k < 6; k++) {
+      await sleep(400);
+      const s = sig();
+      if (s && s !== base) return { clicked: true, sel: "scroll", page: curOf(), tried: tried };
+    }
+  } catch (e) { /* 忽略 */ }
+  return { clicked: false, sel: "", reason: "所有翻页方式都试过但页面未变化", tried: tried };
+}
 
-  // ⑤ 滚动到底（无限滚动列表兜底）
+// ===== 注入：点击「下一页」（同步单次：取第一个可点候选，供测试与诊断用）=====
+// 真正用于「抓取全部页」的是上面的 goToNextPage（带验证）；这个同步版只做单次试探。
+// 返回 { clicked, sel, tried }；全部失败返回 { clicked:false, reason }
+function clickNextPage(targetPage) {
+  const cands = pagerCandidates(targetPage);
+  for (const c of cands) {
+    if (!elClickable(c.el)) continue;
+    clickEl(c.el, "native");
+    return { clicked: true, sel: c.sel, tried: [c.sel] };
+  }
+  if (targetPage && targetPage > 1) {
+    const inputs = [];
+    try {
+      Array.prototype.slice.call(document.querySelectorAll("input")).forEach((el) => {
+        const hint = String(el.placeholder || "") + " " + String(el.getAttribute("aria-label") || "") + " " + String(el.className || "");
+        if (/每页|条\s*\/|size|limit|pageSize/i.test(hint)) return;
+        if (!/跳|页码|page|jump/i.test(hint)) return;
+        inputs.push(el);
+      });
+    } catch (e) { /* 忽略 */ }
+    for (const inp of inputs) {
+      try {
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+        if (!setter) continue;
+        setter.call(inp, String(targetPage));
+        inp.dispatchEvent(new Event("input", { bubbles: true }));
+        inp.dispatchEvent(new Event("change", { bubbles: true }));
+        ["keydown", "keypress", "keyup"].forEach((ev) =>
+          inp.dispatchEvent(new KeyboardEvent(ev, { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true }))
+        );
+        return { clicked: true, sel: "jump-input:" + targetPage, tried: ["jump-input:" + targetPage] };
+      } catch (e) { /* 继续尝试 */ }
+    }
+  }
   try {
     window.scrollTo(0, (document.body && document.body.scrollHeight) || 999999);
     const sc = document.scrollingElement;
     if (sc) sc.scrollTop = sc.scrollHeight;
-    return { clicked: true, sel: "scroll" };
+    return { clicked: true, sel: "scroll", tried: ["scroll"] };
   } catch (e) { /* 忽略 */ }
-
-  return { clicked: false, sel: "", reason: "未找到可点击的下一页控件" };
+  return { clicked: false, sel: "", reason: "未找到可点击的下一页控件", tried: [] };
 }
 
 // ===== 注入：页面内容签名（用于判断翻页后是否真的换页了）=====
@@ -752,7 +949,10 @@ function pageSignature() {
 
 // 暴露给「页面内长任务」使用（注入到目标页面的隔离世界里）
 if (typeof window !== "undefined") {
-  window.__IH_PAGE = { extractTables, clickNextPage, pageSignature, pagerInfo, clickPageNumber };
+  window.__IH_PAGE = {
+    extractTables, clickNextPage, pageSignature, pagerInfo, clickPageNumber,
+    pagerCandidates, elClickable, clickEl, goToNextPage,
+  };
 }
 
 // ===== 页面内长任务：自动翻页抓取全部页（自包含）=====
@@ -851,6 +1051,37 @@ async function grabAllInPage(roleKeywords, fields, maxPages) {
     return { ok: false, note: G.note };
   }
   const limit = maxPages || 200;
+
+  // 翻到目标页并确认真的换了页。
+  // v2.8：优先用页面函数库里的 goToNextPage（多候选逐个点击 + 逐个验证）；
+  // 若页面里是旧版函数库，则退化为「单次点击 + 等变化」，保证兼容。
+  async function goNext(target, before, onTry) {
+    if (typeof P.goToNextPage === "function") {
+      try {
+        return await P.goToNextPage(target, before, onTry);
+      } catch (e) {
+        return { clicked: false, sel: "", reason: "翻页异常：" + (e && e.message ? e.message : String(e)), tried: [] };
+      }
+    }
+    const r = P.clickNextPage(target);
+    if (!r || !r.clicked) return { clicked: false, sel: "", reason: (r && r.reason) || "未找到翻页控件", tried: (r && r.tried) || [] };
+    const ok = await waitChange(before);
+    return ok
+      ? { clicked: true, sel: r.sel, tried: [r.sel] }
+      : { clicked: false, sel: r.sel, reason: "翻页后页面未变化（" + r.sel + "）", tried: [r.sel] };
+  }
+
+  // 等页面渲染稳定（连续两次签名相同）——翻页后表格可能仍在重绘，抓早了会拿到半张表
+  async function waitStable() {
+    let prev = "";
+    for (let k = 0; k < 20; k++) {
+      await sleep(300);
+      const s = P.pageSignature();
+      if (s && s === prev) return true;
+      prev = s;
+    }
+    return false;
+  }
   try {
     // ---- ① 读分页器：拿到「当前页 / 总页数」 ----
     let info = null;
@@ -891,7 +1122,7 @@ async function grabAllInPage(roleKeywords, fields, maxPages) {
       G.pages.push({ page: page, tables: data.tables });
       ovPaint(G.curPage || page, G.total, G.pages.length, G.lastClick);
 
-      // ---- ④ 翻页：优先按「分页器当前页码 + 1」作为绝对目标 ----
+      // ---- ④ 翻页：目标 = 「分页器当前页码 + 1」 ----
       let cur = 0, total = G.total, i3 = null;
       try { i3 = typeof P.pagerInfo === "function" ? P.pagerInfo() : null; } catch (e) { i3 = null; }
       if (i3) { cur = i3.cur || 0; if (i3.total) total = i3.total; }
@@ -900,18 +1131,24 @@ async function grabAllInPage(roleKeywords, fields, maxPages) {
       if (total && cur && cur >= total) { G.note = "已到最后一页（共 " + total + " 页）"; break; }
       const target = cur > 0 ? cur + 1 : page + 1;
       const before = P.pageSignature();
-      const clicked = P.clickNextPage(target);
-      if (!clicked || !clicked.clicked) {
-        G.note = "没有下一页了" + (clicked && clicked.reason ? "（" + clicked.reason + "）" : "");
+      const res = await goNext(target, before, function (lbl) {
+        G.lastClick = lbl;
+        ovPaint(G.curPage || page, G.total, G.pages.length, lbl);
+      });
+      if (!res || !res.clicked) {
+        const why = (res && res.reason) || "未知";
+        const tail = (res && res.tried && res.tried.length) ? "（已尝试：" + res.tried.slice(0, 8).join(" / ") + "）" : "";
+        // 「找不到控件 / 最后一页」是正常收尾，别吓用户；真的翻不动才报「翻页失败」
+        G.note = (/最后一页|没有下一页|未找到/.test(why) ? "没有下一页了（" + why + "）" : "翻页失败：" + why) + tail;
         break;
       }
-      G.lastClick = clicked.sel;
+      G.lastClick = res.sel;
+      if (res.page) G.curPage = res.page;
+      if (res.mismatch) {
+        G.note = "注意：目标第 " + target + " 页，实际到第 " + res.page + " 页（方式：" + res.sel + "）";
+      }
       ovPaint(G.curPage || page, G.total, G.pages.length, G.lastClick);
-      const changed = await waitChange(before);
-      if (!changed) {
-        G.note = "翻页后页面未变化（方式：" + clicked.sel + "）";
-        break;
-      }
+      await waitStable(); // 等新一页渲染稳定，再进入下一轮提取
     }
     if (G.stop && !G.note) G.note = "已手动停止";
   } catch (e) {
