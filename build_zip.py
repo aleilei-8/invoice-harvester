@@ -19,6 +19,7 @@ INCLUDE = [
     "popup.html",
     "popup.css",
     "lib.js",
+    "pagefuncs.js",
     "xlsx.full.min.js",
     "popup.js",
     "background.js",

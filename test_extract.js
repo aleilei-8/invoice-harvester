@@ -10,8 +10,9 @@ function check(name, cond) {
   if (!cond) fail++;
 }
 
-// ---- 从 popup.js 抽出自包含的 extractTables 源码并求值 ----
-const src = fs.readFileSync(path.join(D, "popup.js"), "utf8");
+// ---- 从 pagefuncs.js 抽出自包含的 extractTables 源码并求值 ----
+// （注入函数已从 popup.js 抽到 pagefuncs.js，供弹窗与目标页面共用）
+const src = fs.readFileSync(path.join(D, "pagefuncs.js"), "utf8");
 const m = src.match(/function extractTables\(roleKeywords, fields\) \{[\s\S]*?\n\}/);
 if (!m) { console.error("未找到 extractTables 函数"); process.exit(1); }
 const extractTables = new Function(
@@ -382,5 +383,141 @@ if (res.tables[0]) {
   check("H 未误抓商品编码 1688-829901726375", p2 && hg(p2, "快递单号").indexOf("829901726375") === -1);
 }
 
-console.log("\n" + (fail === 0 ? "ALL TESTS PASSED ✅" : fail + " TEST(S) FAILED ❌"));
-process.exit(fail === 0 ? 0 : 1);
+// ================================================================
+console.log("[I] 繁体快递公司（跨境/集运仓真实原文）+ 物流行在 table 内");
+const iTpl = table([row(orderTpl, true)]);
+const iRow = ["透明防皱皱纹贴硅胶贴自粘软胶去皱医用硅胶贴硅胶贴面部美容 ID: 663969680444 商品编码: 1688-829901726375 脸部5件套,均码", "已收货", "1", "9.68", "9.68", "**** 查看 **** **** **** ****", "E*** 发起聊天", "查看详情 添加备注 物流信息"];
+const i1Head = ["", "订单编号：\n260706-628998869351942\n复制\n成交时间：2026-07-06 00:43"];
+const i1Logi = ["物流信息： 集运仓 消费者 （二段物流） 極兔速遞HK JT0024585595081复制 包裹已從【來取易自提點】取出 2026-07-10 19:06:30"];
+const i2Head = ["", "订单编号：\n260707-472781954623938\n复制\n成交时间：2026-07-07 00:14"];
+const i2Logi = ["物流信息：圓通速遞 YT7631536107699复制 您的快件已投递，收件人: 齐沙一路2号仓库。如遇找不到包裹等问题，请联系快递员:18588154207"];
+const tI1 = table([row(i1Head, true), row(iRow, false), row(i1Logi, false)]);
+const tI2 = table([row(i2Head, true), row(iRow, false), row(i2Logi, false)]);
+global.document = makeDoc([iTpl, tI1, tI2], "");
+res = extractTables(PDD_KW, FIELDS_META);
+if (res.tables[0]) {
+  const TI = res.tables[0];
+  const ic = (label) => TI.headers.indexOf(label);
+  const ig = (r, label) => r[ic(label)];
+  const k1 = TI.rows.find((r) => ig(r, "订单号") === "260706-628998869351942");
+  check("I 繁体「極兔速遞」→ 输出简体「极兔速递」", k1 && ig(k1, "快递公司") === "极兔速递");
+  check("I 集运仓单号 JT0024585595081（HK 路由标识已剥离）", k1 && ig(k1, "快递单号") === "JT0024585595081");
+  check("I「（二段物流）」未被误判为公司", k1 && ig(k1, "快递公司").indexOf("二段") === -1);
+  const k2 = TI.rows.find((r) => ig(r, "订单号") === "260707-472781954623938");
+  check("I 繁体「圓通速遞」→ 输出简体「圆通速递」", k2 && ig(k2, "快递公司") === "圆通速递");
+  check("I 圆通单号 YT7631536107699（不误抓快递员电话）", k2 && ig(k2, "快递单号") === "YT7631536107699");
+}
+
+// ================================================================
+console.log("[J] 翻页控件识别：next 类名 / 激活页码+1 / 禁用跳过 / 滚动兜底");
+const cnpSrc = src.match(/function clickNextPage\(targetPage\) \{[\s\S]*?\n\}/);
+if (!cnpSrc) { check("J 找到 clickNextPage 源码", false); }
+else {
+  const clickNextPage = new Function("return (" + cnpSrc[0] + ");")();
+  global.window = { scrollTo() {} };
+  function pgEl(text, cls) {
+    return {
+      innerText: text, className: cls || "", offsetParent: {}, disabled: false, clicked: false,
+      click() { this.clicked = true; },
+      getAttribute() { return null; },
+      closest() { return null; },
+    };
+  }
+  function setDoc(els) {
+    global.document = {
+      querySelectorAll(sel) {
+        if (/next/i.test(sel)) return els.filter((e) => /next/.test(String(e.className || "")));
+        if (sel === "button, a, li, span, i, div") return els;
+        return [];
+      },
+      body: { innerText: "", scrollHeight: 100 },
+      scrollingElement: { scrollTop: 0, scrollHeight: 100 },
+    };
+  }
+  // ① 类名含 next
+  const eNext = pgEl("›", "pager-next");
+  setDoc([pgEl("1", "pager-item active"), pgEl("2", "pager-item"), eNext]);
+  const r1 = clickNextPage(2);
+  check("J ① next 类名命中并点击", r1.clicked && /next/.test(r1.sel) && eNext.clicked === true);
+
+  // ② 无 next 类名 → 自研分页器「激活页码 + 1」
+  const a3 = pgEl("3", "pager-item active");
+  const a4 = pgEl("4", "pager-item");
+  setDoc([a3, a4]);
+  const r2 = clickNextPage(4);
+  check("J ② 激活页码+1 命中（自研分页器兜底）", r2.clicked && r2.sel === "page+3" && a4.clicked === true);
+
+  // ③ 禁用的 next 必须跳过（否则会在最后一页反复点）
+  const eNextDis = pgEl("›", "pager-next disabled");
+  setDoc([eNextDis]);
+  const r3 = clickNextPage(2);
+  check("J ③ 禁用 next 被跳过、未点击", eNextDis.clicked === false);
+  check("J ③ 退化为滚动兜底", r3.clicked === true && r3.sel === "scroll");
+}
+
+// ================================================================
+console.log("[K] 页面内抓取循环（grabAllInPage）：逐页抓取 / 末页停止 / 空表重试 / 未注入报错");
+(async () => {
+  const realST = global.setTimeout;
+  global.setTimeout = (fn) => realST(fn, 1); // 把循环里的等待压到 1ms，测试秒级完成
+  const gapSrc = src.match(/async function grabAllInPage\(roleKeywords, fields, maxPages\) \{[\s\S]*?\n\}/);
+  if (!gapSrc) { check("K 找到 grabAllInPage 源码", false); }
+  else {
+    const grabAllInPage = new Function("return (" + gapSrc[0] + ");")();
+    function setEnv(pages, opts) {
+      let idx = 0;
+      const o = opts || {};
+      global.window = {
+        __IH_PAGE: {
+          extractTables: () => ({ tables: [{ headers: ["订单号"], rows: [[pages[idx] || ""]], rowCount: 1 }] }),
+          pageSignature: () => "sig" + idx,
+          clickNextPage: () => {
+            if (o.noClick) return { clicked: false, reason: "未找到翻页控件" };
+            idx++;
+            return idx < pages.length ? { clicked: true, sel: "next" } : { clicked: false, reason: "最后一页" };
+          },
+        },
+      };
+    }
+    setEnv(["A", "B", "C"]);
+    const r1 = await grabAllInPage({}, [], 200);
+    check("K 逐页抓到 3 页", r1.total === 3 && window.__IH_GRAB.pages.length === 3);
+    check("K 页码与顺序正确", window.__IH_GRAB.pages.map((p) => p.tables[0].rows[0][0]).join("") === "ABC");
+    check("K 末页后正常结束", r1.note.indexOf("没有下一页了") !== -1);
+    check("K 任务结束标记正确", window.__IH_GRAB.done === true && window.__IH_GRAB.running === false);
+
+    setEnv(["X", "Y"], { noClick: true });
+    const r2 = await grabAllInPage({}, [], 200);
+    check("K 找不到翻页控件 → 抓 1 页即结束", r2.total === 1);
+
+    // 翻页成功但页面内容始终不变 → 必须停止（否则会无限循环）
+    global.window = {
+      __IH_PAGE: {
+        extractTables: () => ({ tables: [{ headers: ["订单号"], rows: [["Z"]], rowCount: 1 }] }),
+        pageSignature: () => "same",
+        clickNextPage: () => ({ clicked: true, sel: "next" }),
+      },
+    };
+    const r3 = await grabAllInPage({}, [], 200);
+    check("K 页面始终未变化 → 停止并记录原因", r3.total === 1 && r3.note.indexOf("未变化") !== -1);
+
+    // 首轮空表（翻页渲染未完成）→ 重试后应成功
+    let calls = 0;
+    global.window = {
+      __IH_PAGE: {
+        extractTables: () => { calls++; return calls < 2 ? { tables: [] } : { tables: [{ headers: ["订单号"], rows: [["F"]], rowCount: 1 }] }; },
+        pageSignature: () => "s" + calls,
+        clickNextPage: () => ({ clicked: false, reason: "最后一页" }),
+      },
+    };
+    const r4 = await grabAllInPage({}, [], 200);
+    check("K 首轮空表经重试后成功", r4.total === 1 && window.__IH_GRAB.pages[0].tables[0].rows[0][0] === "F");
+
+    global.window = {};
+    const r5 = await grabAllInPage({}, [], 200);
+    check("K 页面函数库未注入 → 明确报错", r5.ok === false && r5.note.indexOf("未注入") !== -1);
+  }
+  global.setTimeout = realST;
+  console.log("\n" + (fail === 0 ? "ALL TESTS PASSED ✅" : fail + " TEST(S) FAILED ❌"));
+  process.exit(fail === 0 ? 0 : 1); // 必须放在异步块内，否则会在异步测试跑完前退出
+})();
