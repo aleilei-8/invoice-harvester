@@ -38,14 +38,38 @@ function makeDoc(tables) {
 const PDD_KW = {
   buyer_title: ["发票抬头", "抬头", "公司名称", "购买方名称", "购方名称", "名称"],
   tax_no: ["企业税号", "税号", "纳税人识别号", "统一社会信用代码", "识别号", "信用代码", "tax", "tin", "纳税人"],
+  invoice_kind: ["发票种类", "发票类别", "种类"],
+  invoice_type: ["发票类型", "蓝票", "红票"],
+  extra_info: ["其他信息", "开户银行", "开户行"],
   order_id: ["订单号", "订单编号", "订单", "单号", "order", "no.", "编号"],
-  tracking_no: ["快递单号", "物流单号", "运单号", "货运单号", "tracking", "waybill", "物流"],
-  amount: ["发票金额", "金额", "价税合计", "开票金额", "实付金额", "合计", "金额(元)", "amount", "price", "价税"],
-  items: ["物品", "商品", "发票内容", "货物", "货品", "商品名称", "item", "product", "内容", "品名"],
+  order_status: ["订单/售后状态", "订单状态", "成交状态"],
+  after_sale: ["售后状态", "售后"],
+  tracking_no: ["快递单号", "物流单号", "运单号", "货运单号", "tracking", "waybill"],
+  logistics: ["物流信息", "物流"],
+  amount: ["发票金额", "实收金额", "金额", "价税合计", "开票金额", "实付金额", "合计", "金额(元)", "amount", "price", "价税"],
+  items: ["商品信息", "商品名称", "物品", "商品", "发票内容", "货物", "货品", "宝贝标题", "item", "product", "内容", "品名"],
   invoice_date: ["开票时间", "开票日期", "开票日期时间"],
   apply_date: ["申请时间", "申请日期", "apply"],
   buyer: ["买家", "收货人", "购买方", "customer", "consignee", "收件人"],
 };
+
+const FIELDS_META = [
+  { key: "buyer_title", label: "发票抬头" },
+  { key: "tax_no", label: "税号" },
+  { key: "invoice_kind", label: "发票种类" },
+  { key: "invoice_type", label: "发票类型" },
+  { key: "extra_info", label: "其他信息" },
+  { key: "order_id", label: "订单号" },
+  { key: "order_status", label: "订单状态" },
+  { key: "after_sale", label: "售后状态" },
+  { key: "tracking_no", label: "快递单号" },
+  { key: "logistics", label: "物流信息" },
+  { key: "amount", label: "金额" },
+  { key: "items", label: "物品" },
+  { key: "invoice_date", label: "开票时间" },
+  { key: "apply_date", label: "申请时间" },
+  { key: "buyer", label: "买家" },
+];
 
 // ================================================================
 console.log("[A] 拼多多真实结构：粘性表头单独成表 + 数据表（诊断原文结构）");
@@ -69,8 +93,11 @@ if (T) {
   check("发票金额 → amount", roleOf(5) === "amount");
   check("发票抬头 → buyer_title", roleOf(10) === "buyer_title");
   check("企业税号 → tax_no", roleOf(11) === "tax_no");
+  check("发票种类 → invoice_kind", roleOf(7) === "invoice_kind");
+  check("发票类型 → invoice_type", roleOf(8) === "invoice_type");
+  check("其他信息 → extra_info", roleOf(12) === "extra_info");
   check("抬头类型 不抢 buyer_title", roleOf(9) === "");
-  check("订单状态 不抢 order_id", roleOf(2) === "");
+  check("订单状态 → order_status（不抢 order_id）", roleOf(2) === "order_status");
   check("承诺开票时间 不映射为 invoice_date", roleOf(14) === "");
   check("首行数据可取到发票抬头", T.rows[0][10] === "新疆智源常安商贸有限公司");
   check("第二行税号正确", T.rows[1][11] === "91430102MAEFUWCL51");
@@ -120,6 +147,61 @@ check("仍识别 1 张表", res.tables.length === 1);
 if (res.tables[0]) {
   check("表头来自后面的纯表头表", res.tables[0].headers[10] === "发票抬头");
   check("行数正确", res.tables[0].rowCount === 2);
+}
+
+// ================================================================
+console.log("[E] 拼多多订单查询页：卡片式订单列表（跨列订单号行 + 内容行 + 物流行）");
+const orderHeaders = ["商品信息", "订单/售后状态", "数量", "商品单价(元)", "实收金额(元)", "收货信息", "买家", "操作/备注"];
+const t6 = table([
+  row(orderHeaders, true),
+  // 订单 1：跨列订单号行
+  row(["订单号：261003-588691555882667 复制 成交时间：2026-10-03 14:19 天 21时04分02秒 后将超时收款"], false),
+  // 订单 1：内容行
+  row([
+    "时尚女装的光光内双面呢短… ID:659806649941 商品编号:688-670977647115 110mMSM款现货卡布十4个;…",
+    "待发货",
+    "1",
+    "12.90",
+    "12.90",
+    "S** 云看 广东省中山市黄圃镇****",
+    "E***",
+    "查看详情 添加备注",
+  ], false),
+  // 订单 1：物流行
+  row(["物流信息: 中通快递 79037027548891 复制 ● [金华市] 快件已发往 scatter运中心, 如有疑问请联系 [客服热线: 95311] 2026-10-03 17:09:00"], false),
+  // 订单 2
+  row(["订单号：261003-643701333830600 复制 平台承担运达 成交时间：2025-10-03 07:40"], false),
+  row([
+    "透明防粘贴胶条贴起贴防贴软胶… ID: 65899901444 商品编号:1068-92390178575 颜色:6号斗30对",
+    "已发货, 待收货",
+    "1",
+    "23.80",
+    "23.80",
+    "郑** 云看 广东省广州市番禺区****",
+    "宇***",
+    "查看详情 添加备注",
+  ], false),
+]);
+global.document = makeDoc([t6]);
+res = extractTables(PDD_KW, FIELDS_META);
+check("卡片式还原为 1 张表", res.tables.length === 1 && res.tables[0].cardMode === true);
+if (res.tables[0]) {
+  const T6 = res.tables[0];
+  check("还原出 2 个订单", T6.rowCount === 2);
+  const col = (label) => T6.headers.indexOf(label);
+  check("订单号列存在", col("订单号") !== -1);
+  const r0 = T6.rows[0];
+  const get = (r, label) => r[col(label)];
+  check("订单 1 订单号正确", get(r0, "订单号") === "261003-588691555882667");
+  check("订单 1 物品取自商品信息列", get(r0, "物品").indexOf("时尚女装") !== -1);
+  check("订单 1 金额=实收金额 12.90", get(r0, "金额") === "12.90");
+  check("订单 1 订单状态=待发货", get(r0, "订单状态") === "待发货");
+  check("订单 1 快递单号提取", get(r0, "快递单号") === "79037027548891");
+  check("订单 1 物流信息含快递公司", get(r0, "物流信息").indexOf("中通快递") !== -1);
+  const r1 = T6.rows[1];
+  check("订单 2 订单号正确", get(r1, "订单号") === "261003-643701333830600");
+  check("订单 2 状态=已发货, 待收货", get(r1, "订单状态") === "已发货, 待收货");
+  check("订单 2 金额=23.80", get(r1, "金额") === "23.80");
 }
 
 console.log("\n" + (fail === 0 ? "ALL TESTS PASSED ✅" : fail + " TEST(S) FAILED ❌"));

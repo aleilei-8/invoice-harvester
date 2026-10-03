@@ -10,11 +10,18 @@
   "use strict";
 
   // 标准输出字段（顺序即导出列顺序）
+  // v2.2 新增：发票种类/发票类型/其他信息（开户行等）/订单状态/售后状态/物流信息
   const FIELDS = [
     { key: "buyer_title", label: "发票抬头" },
     { key: "tax_no", label: "税号" },
+    { key: "invoice_kind", label: "发票种类" },
+    { key: "invoice_type", label: "发票类型" },
+    { key: "extra_info", label: "其他信息" },
     { key: "order_id", label: "订单号" },
+    { key: "order_status", label: "订单状态" },
+    { key: "after_sale", label: "售后状态" },
     { key: "tracking_no", label: "快递单号" },
+    { key: "logistics", label: "物流信息" },
     { key: "amount", label: "金额" },
     { key: "items", label: "物品" },
     { key: "invoice_date", label: "开票时间" },

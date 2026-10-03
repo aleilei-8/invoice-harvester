@@ -9,10 +9,16 @@ const PLATFORM_PRESETS = {
     keywords: {
       buyer_title: ["发票抬头", "抬头", "公司名称", "购买方名称", "购方名称", "名称"],
       tax_no: ["企业税号", "税号", "纳税人识别号", "统一社会信用代码", "识别号", "信用代码", "tax", "tin", "纳税人"],
+      invoice_kind: ["发票种类", "发票类别", "种类"],
+      invoice_type: ["发票类型", "蓝票", "红票"],
+      extra_info: ["其他信息", "开户银行", "开户行"],
       order_id: ["订单号", "订单编号", "订单", "单号", "order", "no.", "编号"],
-      tracking_no: ["快递单号", "物流单号", "运单号", "货运单号", "tracking", "waybill", "物流"],
-      amount: ["发票金额", "金额", "价税合计", "开票金额", "实付金额", "合计", "金额(元)", "amount", "price", "价税"],
-      items: ["物品", "商品", "发票内容", "货物", "货品", "商品名称", "item", "product", "内容", "品名"],
+      order_status: ["订单/售后状态", "订单状态", "成交状态"],
+      after_sale: ["售后状态", "售后"],
+      tracking_no: ["快递单号", "物流单号", "运单号", "货运单号", "tracking", "waybill"],
+      logistics: ["物流信息", "物流"],
+      amount: ["发票金额", "实收金额", "金额", "价税合计", "开票金额", "实付金额", "合计", "金额(元)", "amount", "price", "价税"],
+      items: ["商品信息", "商品名称", "物品", "商品", "发票内容", "货物", "货品", "宝贝标题", "item", "product", "内容", "品名"],
       invoice_date: ["开票时间", "开票日期", "开票日期时间"],
       apply_date: ["申请时间", "申请日期", "apply"],
       buyer: ["买家", "收货人", "购买方", "customer", "consignee", "收件人"],
@@ -70,6 +76,9 @@ let activeKeywords = null;     // 当前生效的 ROLE_KEYWORDS
 
 // ===== 注入到商家后台页面执行的提取函数（必须自包含）=====
 function extractTables(roleKeywords, fields) {
+  const labelOf = {};
+  (fields || []).forEach((f) => { labelOf[f.key] = f.label; });
+
   // 关键词匹配：返回 { role, score }（score=命中关键词长度，用于重复角色仲裁），或 null
   function matchRole(text, kw) {
     if (!text) return null;
@@ -103,9 +112,13 @@ function extractTables(roleKeywords, fields) {
     return dateLike >= 1 || amountLike >= 1 || orderLike >= 1;
   }
 
+  function cellTexts(row) {
+    return Array.from(row.querySelectorAll("th, td")).map((c) => c.innerText.replace(/\s+/g, " ").trim());
+  }
+
   const tables = Array.from(document.querySelectorAll("table"));
 
-  // --- 第一遍：收集候选表（表头单元格 + 数据行）---
+  // --- 第一遍：收集候选表（表头单元格 + 全部数据行，含跨列行）---
   const candidates = [];
   tables.forEach((tbl, idx) => {
     const allRows = Array.from(tbl.querySelectorAll("tr"));
@@ -114,29 +127,25 @@ function extractTables(roleKeywords, fields) {
     let headerRow = allRows.find((r) => r.querySelector("th"));
     let headerCells, dataRows;
     if (headerRow) {
-      headerCells = Array.from(headerRow.querySelectorAll("th, td")).map((c) => c.innerText.trim());
+      headerCells = cellTexts(headerRow);
       dataRows = allRows.filter((r) => r !== headerRow);
     } else {
-      headerCells = Array.from(allRows[0].querySelectorAll("th, td")).map((c) => c.innerText.trim());
+      headerCells = cellTexts(allRows[0]);
       dataRows = allRows.slice(1);
     }
     if (headerCells.length < 2) return;
 
-    const rows = dataRows
-      .map((r) => Array.from(r.querySelectorAll("th, td")).map((c) => c.innerText.replace(/\s+/g, " ").trim()))
-      .filter((r) => r.length >= headerCells.length);
-
-    candidates.push({ idx, headerCells, rows });
+    candidates.push({ idx, headerCells, allCellRows: dataRows.map(cellTexts) });
   });
 
   // --- 第二遍：合并「粘性表头」---
   // 拼多多等后台会把真实表头单独渲染成一张无数据的表（idx 靠前），
   // 数据表则没有 th，首行数据被误当表头。此处把两者拼回：
   // 数据表首行像数据 + 存在列数一致的纯表头表 → 用真表头，且把误当表头的数据行放回数据。
-  const headerOnly = candidates.filter((c) => !c.rows.length && c.headerCells.length >= 3);
+  const headerOnly = candidates.filter((c) => !c.allCellRows.length && c.headerCells.length >= 3);
   const usedHeader = new Set();
   candidates.forEach((c) => {
-    if (!c.rows.length) return;
+    if (!c.allCellRows.length) return;
     if (looksLikeDataRow(c.headerCells)) {
       // 被误当「表头」的那一行本来就是数据，恢复进 rows
       const origDataRow = c.headerCells.map((s) => String(s).replace(/\s+/g, " ").trim());
@@ -151,14 +160,88 @@ function extractTables(roleKeywords, fields) {
         // 没有可合并的纯表头表：列名留空，后续靠内容嗅探识别角色
         c.headerCells = c.headerCells.map(() => "");
       }
-      c.rows.unshift(origDataRow);
+      c.allCellRows.unshift(origDataRow);
     }
+    // 补齐短行（跨列行等），统一列数
+    c.rows = c.allCellRows.map((r) => {
+      const p = r.slice();
+      while (p.length < c.headerCells.length) p.push("");
+      return p;
+    });
   });
 
-  // --- 第三遍：角色映射 + 内容嗅探 ---
+  // --- 卡片式订单列表检测（拼多多订单查询页）---
+  // 结构：每个订单 = 一行跨列「订单号：xxx 复制 … 成交时间」
+  //      + 一行正常内容（商品信息/订单·售后状态/金额/收货信息…）
+  //      + 可选一行跨列「物流信息：中通快递 79037027548891 …」
+  function spanningOrderIdHits(rows) {
+    let hits = 0;
+    rows.forEach((cells) => {
+      if (cells.length <= 2 && /订单号[:：]/.test(cells.join(" "))) hits++;
+    });
+    return hits;
+  }
+
+  function isCardOrderList(c) {
+    const hits = spanningOrderIdHits(c.allCellRows);
+    if (hits >= 2) return true;
+    if (hits >= 1) {
+      const headerText = c.headerCells.join(" ");
+      return headerText.indexOf("商品信息") !== -1 || headerText.indexOf("订单") !== -1;
+    }
+    return false;
+  }
+
+  // 把卡片式订单列表还原成「每订单一行」的标准记录
+  function buildCardTable(c, roleMap) {
+    const recs = [];
+    let cur = null;
+    function flush() {
+      if (cur && cur.order_id) recs.push(cur);
+      cur = null;
+    }
+    c.allCellRows.forEach((cells) => {
+      const text = cells.join(" ");
+      if (cells.length <= 2 && /订单号[:：]/.test(text)) {
+        flush();
+        cur = {};
+        const m = text.match(/订单号[:：]\s*([A-Za-z]*\d[\d\-]{5,})/);
+        if (m) cur.order_id = m[1];
+        return;
+      }
+      if (cells.length <= 2 && /物流信息/.test(text)) {
+        if (cur) {
+          const courier = text.match(/([\u4e00-\u9fa5]{2,12}?(?:快递|物流|速运|货运|邮政))/);
+          const waybill = text.match(/(\d{8,})/);
+          if (waybill) cur.tracking_no = waybill[1];
+          if (courier || waybill) cur.logistics = (courier ? courier[1] : "") + (waybill ? " " + waybill[1] : "");
+        }
+        return;
+      }
+      if (cells.length >= 3 && cur) {
+        c.headerCells.forEach((hc, ci) => {
+          const role = roleMap[ci];
+          if (role && !cur[role]) cur[role] = cells[ci] || "";
+        });
+      }
+    });
+    flush();
+    if (!recs.length) return null;
+    // 输出列：订单号 + 有值的角色（固定优先顺序）
+    const seq = ["order_id", "items", "amount", "order_status", "after_sale", "buyer", "tracking_no", "logistics"];
+    const roleSeq = seq.filter((role) => recs.some((r) => r[role]));
+    if (roleSeq.indexOf("order_id") === -1) return null;
+    const headers = roleSeq.map((role) => labelOf[role] || role);
+    const outRoleMap = {};
+    roleSeq.forEach((role, i) => { outRoleMap[i] = role; });
+    const rows = recs.map((r) => roleSeq.map((role) => r[role] || ""));
+    return { idx: c.idx, headers, roleMap: outRoleMap, autoRoles: roleSeq.map((_, i) => i), rows, rowCount: rows.length, cardMode: true };
+  }
+
+  // --- 第三遍：角色映射 + 内容嗅探 +（卡片式还原）---
   const out = [];
   candidates.forEach((c) => {
-    if (!c.rows.length) return;
+    if (!c.rows || !c.rows.length) return;
     const headers = c.headerCells;
     const rows = c.rows;
 
@@ -226,9 +309,66 @@ function extractTables(roleKeywords, fields) {
       }
     });
 
+    // 3) 卡片式订单列表 → 还原为每订单一行
+    if (isCardOrderList(c)) {
+      const cardTable = buildCardTable(c, roleMap);
+      if (cardTable) {
+        out.push(cardTable);
+        return;
+      }
+    }
+
     out.push({ idx: c.idx, headers, roleMap, autoRoles, rows, rowCount: rows.length });
   });
   return { tables: out };
+}
+
+// ===== 注入：点击「下一页」（必须自包含）=====
+// 返回 { clicked, sel }；找不到或已禁用返回 { clicked: false }
+function clickNextPage() {
+  const visible = (el) => !!(el && el.offsetParent !== null);
+  const disabled = (el) =>
+    /(^|\s)(disabled|ant-pagination-disabled)/.test(String(el.className || "")) ||
+    el.getAttribute("aria-disabled") === "true" ||
+    (el.closest && el.closest("[disabled]"));
+
+  // 1) 常见分页组件类名
+  const sels = [
+    ".ant-pagination-next",
+    "li[class*=next]",
+    "[class*=pagination] [class*=next]",
+    "[class*=pager] [class*=next]",
+    "button[aria-label*=ext i]",
+    "a[aria-label*=ext i]",
+  ];
+  for (const s of sels) {
+    for (const el of document.querySelectorAll(s)) {
+      if (!visible(el) || disabled(el)) continue;
+      el.click();
+      return { clicked: true, sel: s };
+    }
+  }
+  // 2) 文本兜底：「下一页」/ >
+  const cands = Array.from(
+    document.querySelectorAll("button, a, li, span[role=button], div[role=button], span[class*=next], div[class*=next]")
+  );
+  for (const el of cands) {
+    const t = (el.innerText || "").trim();
+    if (t !== "下一页" && t !== ">" && t !== "»") continue;
+    if (!visible(el) || disabled(el)) continue;
+    el.click();
+    return { clicked: true, sel: "text:" + t };
+  }
+  return { clicked: false };
+}
+
+// ===== 注入：页面内容签名（用于判断翻页后是否真的换页了）=====
+function pageSignature() {
+  let txt = "";
+  const ts = Array.from(document.querySelectorAll("table"));
+  for (const tb of ts) txt += tb.innerText.slice(0, 2000) + "|";
+  if (!txt) txt = document.body ? document.body.innerText.slice(0, 2000) : "";
+  return txt.slice(0, 3000);
 }
 
 // ===== UI 辅助 =====
@@ -382,6 +522,99 @@ function grab() {
   });
 }
 
+// ===== 抓取全部页（自动翻页）=====
+const MAX_PAGES = 200;
+let grabbingAll = false;
+
+function injectOnce(tabId, func, args) {
+  return new Promise((resolve) => {
+    chrome.scripting.executeScript({ target: { tabId }, func, args: args || [] }, (res) => {
+      if (chrome.runtime.lastError) { resolve(null); return; }
+      resolve(res && res[0] && res[0].result !== undefined ? res[0].result : null);
+    });
+  });
+}
+
+function activeTab() {
+  return new Promise((resolve) => {
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      const tab = tabs && tabs[0];
+      resolve(tab && tab.url && tab.url.indexOf("http") === 0 ? tab : null);
+    });
+  });
+}
+
+function getKeywordsPromise() {
+  return new Promise((resolve) => getActiveKeywords(resolve));
+}
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+// 等待页面内容变化（最多 8 秒）
+async function waitPageChange(tabId, oldSig) {
+  for (let i = 0; i < 16; i++) {
+    await sleep(500);
+    const sig = await injectOnce(tabId, pageSignature, []);
+    if (sig && sig !== oldSig) return true;
+  }
+  return false;
+}
+
+async function grabAll() {
+  if (grabbingAll) { log("已有一次「抓取全部页」在进行中", "warn"); return; }
+  const tab = await activeTab();
+  if (!tab) {
+    $("status").textContent = "请先在电商商家后台打开页面";
+    log("当前页面不是网页（http/https），请切换后重试", "err");
+    return;
+  }
+  grabbingAll = true;
+  $("btn-grab-all").disabled = true;
+  try {
+    const kw = await getKeywordsPromise();
+    activeKeywords = kw;
+    log("开始抓取全部页：每页抓取后立即入库（按订单号去重），中断后重跑不丢数据");
+    let page = 1;
+    let totalAdded = 0, totalMerged = 0, totalRows = 0;
+    while (page <= MAX_PAGES) {
+      $("status").textContent = `抓取全部页：第 ${page} 页…（请保持弹窗打开）`;
+      const sig = await injectOnce(tab.id, pageSignature, []);
+      const data = await injectOnce(tab.id, extractTables, [kw, FIELDS]);
+      if (!data || !data.tables.length) {
+        log(`第 ${page} 页未识别到表格，停止`, "warn");
+        break;
+      }
+      const r = await mergeTablesIntoLib(data.tables);
+      totalAdded += r.added;
+      totalMerged += r.merged;
+      totalRows += r.rows;
+      lastTables = data.tables;
+      renderTables(data.tables);
+      refreshLibCount();
+      log(`第 ${page} 页：新增 ${r.added}，合并 ${r.merged}（累计 ${totalRows} 行）`, "ok");
+      // 翻页
+      const clickRes = await injectOnce(tab.id, clickNextPage, []);
+      if (!clickRes || !clickRes.clicked) {
+        log("没有下一页了，抓取完成", "ok");
+        break;
+      }
+      const changed = await waitPageChange(tab.id, sig);
+      if (!changed) {
+        log("翻页后页面未变化，停止（可能已是最后一页或翻页失败）", "warn");
+        break;
+      }
+      page++;
+    }
+    $("status").textContent = `抓取全部页完成：${page} 页，新增 ${totalAdded} / 合并 ${totalMerged} 条`;
+    log(`全部页抓取完成：共 ${page} 页，新增 ${totalAdded} 条，合并 ${totalMerged} 条`, "ok");
+  } finally {
+    grabbingAll = false;
+    $("btn-grab-all").disabled = false;
+  }
+}
+
 // ===== 渲染表格卡片 =====
 function renderTables(tables) {
   const box = $("tables");
@@ -460,54 +693,70 @@ function renderTables(tables) {
   });
 }
 
-// ===== 追加到汇总库 =====
+// ===== 追加到汇总库（Promise 版，供手动追加与自动翻页共用）=====
+// 返回 { added, merged, skipped, rows }
+function mergeTablesIntoLib(tables) {
+  return new Promise((resolve) => {
+    const plat = $("platform").value;
+    const sourceLabel = plat === "custom" ? "invoice-harvester/custom" : "invoice-harvester/" + plat;
+    chrome.storage.local.get("invoice_records", (d) => {
+      const lib = Array.isArray(d.invoice_records) ? d.invoice_records.slice() : [];
+      let added = 0;
+      let merged = 0;
+      let skipped = 0;
+      let rows = 0;
+      const now = new Date().toISOString();
+
+      tables.forEach((t) => {
+        const colOf = {};
+        Object.keys(t.roleMap).forEach((ci) => {
+          const role = t.roleMap[ci];
+          if (role) colOf[role] = parseInt(ci, 10);
+        });
+        t.rows.forEach((r) => {
+          rows++;
+          const rec = {};
+          FIELDS.forEach((f) => {
+            const ci = colOf[f.key];
+            rec[f.key] = ci != null && r[ci] != null ? r[ci] : "";
+          });
+          rec.captured_at = now;
+          rec.platform = plat;
+          rec.source = sourceLabel;
+          rec.order_id = IH_LIB.cleanOrderId(rec.order_id); // 剥离「订单号 逾期未开票」类混合文本
+          const oid = (rec.order_id || "").trim();
+          if (!oid) { skipped++; return; } // 无订单号的行（跨列行等）不入库
+          const exist = lib.find((x) => (x.order_id || "").trim() === oid);
+          if (exist) {
+            // 按订单号合并：只补空字段（发票页 + 订单页信息自动拼合）
+            FIELDS.forEach((f) => {
+              if (!exist[f.key] && rec[f.key]) exist[f.key] = rec[f.key];
+            });
+            merged++;
+          } else {
+            lib.push(rec);
+            added++;
+          }
+        });
+      });
+
+      chrome.storage.local.set({ invoice_records: lib }, () => {
+        resolve({ added, merged, skipped, rows });
+      });
+    });
+  });
+}
+
 function append() {
   if (!lastTables) {
     log("请先点「抓取本页」", "warn");
     return;
   }
-  const plat = $("platform").value;
-  const sourceLabel = plat === "custom" ? "invoice-harvester/custom" : "invoice-harvester/" + plat;
-  chrome.storage.local.get("invoice_records", (d) => {
-    const lib = Array.isArray(d.invoice_records) ? d.invoice_records.slice() : [];
-    let added = 0;
-    let merged = 0;
-    const now = new Date().toISOString();
-
-    lastTables.forEach((t) => {
-      const colOf = {};
-      Object.keys(t.roleMap).forEach((ci) => {
-        const role = t.roleMap[ci];
-        if (role) colOf[role] = parseInt(ci, 10);
-      });
-      t.rows.forEach((r) => {
-        const rec = {};
-        FIELDS.forEach((f) => {
-          const ci = colOf[f.key];
-          rec[f.key] = ci != null && r[ci] != null ? r[ci] : "";
-        });
-        rec.captured_at = now;
-        rec.platform = plat;
-        rec.source = sourceLabel;
-        rec.order_id = IH_LIB.cleanOrderId(rec.order_id); // 剥离「订单号 逾期未开票」类混合文本
-        const oid = (rec.order_id || "").trim();
-        if (oid && lib.some((x) => (x.order_id || "").trim() === oid)) {
-          const exist = lib.find((x) => (x.order_id || "").trim() === oid);
-          FIELDS.forEach((f) => {
-            if (!exist[f.key] && rec[f.key]) exist[f.key] = rec[f.key];
-          });
-          merged++;
-        } else {
-          lib.push(rec);
-          added++;
-        }
-      });
-    });
-
-    chrome.storage.local.set({ invoice_records: lib }, () => {
-      refreshLibCount();
-      log(`追加完成：新增 ${added} 条，合并补充 ${merged} 条`, "ok");
-    });
+  mergeTablesIntoLib(lastTables).then((r) => {
+    refreshLibCount();
+    let msg = `追加完成：新增 ${r.added} 条，合并补充 ${r.merged} 条`;
+    if (r.skipped) msg += `，跳过无订单号行 ${r.skipped} 条`;
+    log(msg, "ok");
   });
 }
 
@@ -636,6 +885,7 @@ function copyDiag() {
 document.addEventListener("DOMContentLoaded", () => {
   loadPlatformSelector();
   $("btn-grab").addEventListener("click", grab);
+  $("btn-grab-all").addEventListener("click", grabAll);
   $("btn-append").addEventListener("click", append);
   $("btn-export-csv").addEventListener("click", exportCsv);
   $("btn-export-xlsx").addEventListener("click", exportXlsx);
