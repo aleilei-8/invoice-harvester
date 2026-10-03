@@ -235,6 +235,8 @@ function grab() {
 
 // ===== 抓取全部页（自动翻页）=====
 const MAX_PAGES = 200;
+// 与 pagefuncs.js 里 window.__IH_PAGE.ver 保持一致：用于识别「页面里跑的是不是当前版本」
+const PAGE_VER = "2.9.0";
 let grabbingAll = false;
 
 function injectOnce(tabId, func, args) {
@@ -281,6 +283,7 @@ function readGrabState(tabId, sincePage, wantChunk) {
     return {
       running: !!g.running,
       done: !!g.done,
+      ver: g.ver || "",
       page: g.page || 0,
       curPage: g.curPage || 0,
       totalPages: g.total || 0,
@@ -326,12 +329,21 @@ async function grabAll() {
     // 若页面内已有任务在跑（比如弹窗被关过再重开），直接接管，绝不重复启动
     const st0 = await readGrabState(tab.id, 0, false);
     let lastPage = (st0 && st0.mergedPage) || 0;
-    if (st0 && st0.running) {
+    if (st0 && st0.running && st0.ver !== PAGE_VER) {
+      // 页面里的循环是**旧版本**注入的（比如刚更新完插件，但那个页面没刷新过）。
+      // 旧循环不会用上新逻辑，直接接管只会「看着没变化」，所以先请它安全停下，再起新版。
+      log(`页面里还在跑旧版本的抓取任务（v${st0.ver || "未知"}）→ 先让它安全停止，再启动 v${PAGE_VER} 的新逻辑；若仍异常请按 F5 刷新页面`, "warn");
+      $("status").textContent = "正在停止旧版本抓取任务…";
+      await requestStop(tab.id);
+      await sleep(3000);
+    }
+    const st0b = await readGrabState(tab.id, 0, false);
+    if (st0b && st0b.running) {
       log("检测到页面内已有抓取任务在运行，接管并继续入库（未重新启动循环）", "warn");
     } else {
       log("开始抓取全部页：循环在页面内运行，**弹窗可以关闭**；进度显示在网页右上角浮层");
-      if (st0 && st0.curPage > 1) {
-        log(`注意：当前页面停在第 ${st0.curPage} 页，脚本会先自动回到第 1 页再开始抓`, "warn");
+      if (st0b && st0b.curPage > 1) {
+        log(`注意：当前页面停在第 ${st0b.curPage} 页，脚本会先自动回到第 1 页再开始抓`, "warn");
       }
       $("status").textContent = "抓取全部页：启动中…";
       injectOnce(tab.id, grabAllInPage, [kw, FIELDS, MAX_PAGES]); // 长任务，不等待返回
@@ -373,6 +385,11 @@ async function grabAll() {
         const tail = st.note ? `（${st.note}）` : "";
         log(`全部页抓取完成：共 ${lastPage} 页，新增 ${totalAdded} 条，合并 ${totalMerged} 条${tail}`, "ok");
         $("status").textContent = `抓取完成：${lastPage} 页，新增 ${totalAdded} / 合并 ${totalMerged} 条`;
+        // 非正常收尾（翻页未生效 / 跳页 / 翻不动）时提醒核对，必要时清库重抓
+        if (st.note && /完全相同|跳页|翻页失败|未识别到表格/.test(st.note)) {
+          log("⚠️ 本次没有抓到最后一页。建议：按 F5 刷新商家后台页面 → 再点「抓取全部页」；" +
+            "若汇总里有重复行，可点「清空汇总库」后重抓（导出前请先确认）", "warn");
+        }
         break;
       }
       if (idleRounds > 40) { // 连续 60 秒没有任何新页 → 认为任务已卡死/结束
@@ -777,7 +794,14 @@ function copyDiag() {
             };
           }
         } catch (e) { pagerClick = { err: String(e && e.message || e) }; }
-        return { url: location.href, title: document.title, pager, pagerClick, outerLogi, logiProbe, tables };
+        // v2.9 分页器结构 dump：把「三级定位到底认到了哪一层、那一层的 HTML、页码、箭头候选」
+        // 全部打出来。翻页再失败时回传这一段，就能直接改选择器，不用再猜。
+        let pagerDump = null;
+        try {
+          const P2 = window.__IH_PAGE;
+          pagerDump = (P2 && typeof P2.pagerDump === "function") ? P2.pagerDump() : { injected: false, hasPage: !!P2 };
+        } catch (e) { pagerDump = { err: String(e && e.message || e) }; }
+        return { url: location.href, title: document.title, pager, pagerClick, pagerDump, outerLogi, logiProbe, tables };
       },
     }, (res) => {
       const data = res && res[0] && res[0].result;
@@ -830,6 +854,9 @@ document.addEventListener("DOMContentLoaded", () => {
       $("status").textContent = `页面内抓取任务运行中：第 ${st.curPage || st.page}${st.totalPages ? "/" + st.totalPages : ""} 页…`;
       $("btn-stop").hidden = false;
       log(`检测到页面内抓取任务仍在运行（第 ${st.curPage || st.page} 页）——点「抓取全部页」可接管并继续入库，「停止抓取」可中止`, "warn");
+      if (st.ver !== PAGE_VER) {
+        log(`⚠️ 但它是旧版本 v${st.ver || "未知"} 注入的循环（当前 v${PAGE_VER}）：点「抓取全部页」会先停掉它再起新版；想彻底干净就按 F5 刷新页面`, "warn");
+      }
     } else if (st.done && st.total > st.mergedPage) {
       log(`页面内有 ${st.total - st.mergedPage} 页抓取结果尚未入库——点「抓取全部页」补入库`, "warn");
     }

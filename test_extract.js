@@ -415,11 +415,24 @@ if (res.tables[0]) {
 // 等价于浏览器里 pagefuncs.js 作为整份脚本加载后的作用域关系。
 const piSrc = src.match(/function pagerInfo\(\) \{[\s\S]*?\n\}/);
 const cpnSrc = src.match(/function clickPageNumber\(n\) \{[\s\S]*?\n\}/);
+// v2.9：pagerInfo 依赖 pagerRow / reverseRow（三级定位），goToNextPage 依赖 pageKey（指纹）
+const prSrc = src.match(/function pagerRow\(\) \{[\s\S]*?\n\}/);
+const rrSrc = src.match(/function reverseRow\(\) \{[\s\S]*?\n\}/);
+const pdSrc = src.match(/function pagerDump\(\) \{[\s\S]*?\n\}/);
+const pkSrc = src.match(/function pageKey\(\) \{[\s\S]*?\n\}/);
 check("找到 pagerInfo / clickPageNumber 源码", !!piSrc && !!cpnSrc);
+check("找到 pagerRow / reverseRow / pagerDump / pageKey 源码", !!prSrc && !!rrSrc && !!pdSrc && !!pkSrc);
 const pagerInfoFn = piSrc ? new Function("return (" + piSrc[0] + ");")() : null;
 const clickPageNumberFn = cpnSrc ? new Function("return (" + cpnSrc[0] + ");")() : null;
+const pagerRowFn = prSrc ? new Function("return (" + prSrc[0] + ");")() : null;
+const reverseRowFn = rrSrc ? new Function("return (" + rrSrc[0] + ");")() : null;
+const pagerDumpFn = pdSrc ? new Function("return (" + pdSrc[0] + ");")() : null;
+const pageKeyFn = pkSrc ? new Function("return (" + pkSrc[0] + ");")() : null;
+global.pagerRow = pagerRowFn;
+global.reverseRow = reverseRowFn;
 global.pagerInfo = pagerInfoFn;
 global.clickPageNumber = clickPageNumberFn;
+global.pageKey = pageKeyFn;
 
 // v2.8：clickNextPage / goToNextPage 还会用到这几个函数（同样只能看到全局作用域）
 const isnSrc = src.match(/function isDisabled\(el\) \{[\s\S]*?\n\}/);
@@ -453,6 +466,7 @@ else {
       querySelectorAll(sel) {
         if (/next/i.test(sel)) return els.filter((e) => /next/.test(String(e.className || "")));
         if (sel === "button, a, li, span, i, div") return els;
+        if (sel === "li, a, button, span, i, b, em, div, label, strong") return els;
         return [];
       },
       body: { innerText: "", scrollHeight: 100 },
@@ -520,6 +534,9 @@ function setPagerDoc(box, extraCands, bodyText) {
     querySelectorAll(sel) {
       if (sel === "div, ul, ol, nav, section, span") return box ? [box] : [];
       if (sel === "button, a, li, span, i, div") return extraCands || [];
+      // v2.9 新增的候选/锚点选择器：交给「全局元素表」，让反向法与全局兜底也能被测到
+      if (sel === "li, a, button, span, i, b, em, div, label, strong") return extraCands || [];
+      if (sel === "div, span, em, label, b, strong, i, a, button, li, section, nav, p, ul, ol") return [];
       return [];
     },
     body: { innerText: bodyText || "", scrollHeight: 100 },
@@ -556,10 +573,209 @@ if (pagerInfoFn && clickPageNumberFn && clickNextPageL) {
 }
 
 // ================================================================
+console.log("[O] v2.9 真实分页条：页码嵌一层 + 箭头无 next 类名/无文本（用户卡在第 3 页时候选表为空的形态）");
+// 用户第二次实测浮层的 tried 列表 = pager:[class*="next"]:skipped × 2 + scroll
+// → 说明当时「一个页码候选都没生成、箭头也没认出来」（箭头 class 里既没有 next/arrow，
+//   也没有 › 之类的文本）。这里用能表达这种形态的最小 DOM 复现，并验证三级定位 + 位置法。
+function domEl(tag, cls, text) {
+  const el = {
+    tagName: tag, className: cls || "", id: "", innerText: text || "", textContent: text || "",
+    children: [], parentElement: null, nextElementSibling: null, offsetParent: {},
+    clicked: 0, _attrs: {}, _onClick: null,
+    click() { this.clicked++; if (this._onClick) this._onClick(); },
+    getAttribute(k) { return this._attrs[k] != null ? this._attrs[k] : null; },
+    setAttribute(k, v) { this._attrs[k] = v; },
+    hasAttribute(k) { return this._attrs[k] != null; },
+    closest(sel) {
+      let p = this, g = 0;
+      while (p && g++ < 20) {
+        if (sel === "table" && p.tagName === "TABLE") return p;
+        if (sel === "#__ih_grab_overlay" && p.id === "__ih_grab_overlay") return p;
+        p = p.parentElement;
+      }
+      return null;
+    },
+    contains(x) {
+      if (x === this) return true;
+      for (const c of this.children) { if (c === x || (c.contains && c.contains(x))) return true; }
+      return false;
+    },
+    getBoundingClientRect() { return { left: 10, top: 500, width: 36, height: 24 }; },
+    get outerHTML() {
+      const t = String(tag || "").toLowerCase();
+      return "<" + t + ' class="' + String(cls || "") + '">' + String(text || "") +
+        (this.children || []).map((c) => c.outerHTML).join("") + "</" + t + ">";
+    },
+    querySelectorAll(sel) {
+      const out = [];
+      const walk = (n) => { for (const c of (n.children || [])) { if (matchSel(c, sel)) out.push(c); walk(c); } };
+      walk(this);
+      return out;
+    },
+  };
+  return el;
+}
+function matchSel(el, sel) {
+  const parts = String(sel).split(",");
+  for (let i = 0; i < parts.length; i++) {
+    const s = parts[i].trim();
+    if (!s) continue;
+    let m;
+    if (s === "*") return true;
+    if ((m = s.match(/^\[class\*=["']?([^"'\]]+?)["']?\]$/))) { if (String(el.className || "").indexOf(m[1]) !== -1) return true; continue; }
+    if ((m = s.match(/^\[class\^=["']?([^"'\]]+?)["']?\]$/))) { if (String(el.className || "").indexOf(m[1]) === 0) return true; continue; }
+    if ((m = s.match(/^\[(?:aria-label|title)\*=([^\]]+?)\]$/))) {
+      const v = m[1].replace(/^["']|["']$/g, "");
+      if (String(el.getAttribute("aria-label") || "").indexOf(v) !== -1) return true;
+      if (String(el.getAttribute("title") || "").indexOf(v) !== -1) return true;
+      continue;
+    }
+    if ((m = s.match(/^([a-z]+)\[(.+)\]$/i))) { if (matchSel(el, "[" + m[2] + "]")) return true; continue; }
+    if (s.charAt(0) === "[") continue;
+    if (s.charAt(0) === ".") { if (String(el.className || "").split(/\s+/).indexOf(s.slice(1)) !== -1) return true; continue; }
+    if (s.indexOf(" ") !== -1) {
+      const segs = s.split(/\s+/);
+      if (!matchSel(el, segs[segs.length - 1])) continue;
+      let p = el.parentElement, ok = false, g = 0;
+      while (p && g++ < 6) { if (matchSel(p, segs[0])) { ok = true; break; } p = p.parentElement; }
+      if (ok) return true;
+      continue;
+    }
+    if (String(el.tagName).toLowerCase() === s.toLowerCase()) return true;
+  }
+  return false;
+}
+// 真实形态：
+//   root[div.page-panel]
+//     ├ sizeTxt「每页 20 条」（文案锚点）
+//     └ bar[div.PGT-bar]
+//         ├ numsWrap[div.PGT-nums-wrap]  ← 页码在这一层里面（不是 bar 的直接子元素）
+//         │    └ 1 / … / 18 19 20 21 22
+//         └ nextBtn[span.PGT-btn-go]     ← 箭头：class 无 next/arrow/right，文本为空
+function buildRealPager(o) {
+  const st = { cur: o.cur };
+  const all = [];
+  const reg = (el) => { all.push(el); return el; };
+  const root = reg(domEl("DIV", "page-panel", ""));
+  const bar = reg(domEl("DIV", "PGT-bar", ""));
+  const numsWrap = reg(domEl("DIV", "PGT-nums-wrap", ""));
+  const nextBtn = reg(domEl("SPAN", "PGT-btn-go", ""));
+  let sizeTxt = null;
+  if (o.withSizeText !== false) {
+    const sizeBox = reg(domEl("DIV", "PGT-size-box", ""));
+    sizeTxt = reg(domEl("SPAN", "PGT-size-txt", "每页 20 条"));
+    sizeBox.children.push(sizeTxt); sizeTxt.parentElement = sizeBox;
+    root.children.push(sizeBox); sizeBox.parentElement = root;
+  }
+  const nums = [];
+  o.pages.forEach((n, i) => {
+    const e = reg(domEl("SPAN", "PGT-num" + (n === st.cur ? " current" : ""), String(n)));
+    e._onClick = () => {
+      if ((o.works || []).indexOf("num:" + n) === -1) return;
+      st.cur = n;
+      paint();
+    };
+    nums.push(e);
+    if (o.ellipsis && i === 1) {
+      const el2 = reg(domEl("SPAN", "PGT-ellipsis", "…"));
+      numsWrap.children.push(el2); el2.parentElement = numsWrap;
+    }
+    numsWrap.children.push(e); e.parentElement = numsWrap;
+  });
+  nextBtn._onClick = () => {
+    if ((o.works || []).indexOf("next") === -1) return;
+    st.cur = st.cur + 1;
+    paint();
+  };
+  function paint() {
+    nums.forEach((k) => { k.className = "PGT-num" + (parseInt(k.innerText, 10) === st.cur ? " current" : ""); });
+  }
+  bar.children.push(numsWrap); numsWrap.parentElement = bar;
+  bar.children.push(nextBtn); nextBtn.parentElement = bar;
+  root.children.push(bar); bar.parentElement = root;
+  numsWrap.innerText = o.pages.join(" ");
+  root.innerText = root.children.map((c) => String(c.innerText || "")).join(" ");
+  // 补 nextElementSibling（位置法依赖它）
+  const sync = (n) => {
+    (n.children || []).forEach((c, i) => { c.nextElementSibling = n.children[i + 1] || null; sync(c); });
+  };
+  sync(root);
+  return { root, bar, numsWrap, nextBtn, nums, sizeTxt, st, all };
+}
+function setRealDoc(pk, bodyText) {
+  global.document = {
+    querySelectorAll(sel) { return pk.all.filter((e) => matchSel(e, sel)); },
+    body: { innerText: bodyText || "共有 436 条 每页 20 条", scrollHeight: 100 },
+    scrollingElement: { scrollTop: 0, scrollHeight: 100 },
+  };
+  global.window = { scrollTo() {}, __IH_PAGE: { pageSignature: () => "sig" + pk.st.cur, pageKey: () => "K" + pk.st.cur, pagerInfo: pagerInfoFn } };
+  global.pagerRow = pagerRowFn;
+}
+// 注意：[O] 里有 await（要真跑一遍 goToNextPage），所以做成函数，由下面那个唯一的
+// async 主块**串行**调用——否则两个 async 块会互相覆盖 global.document / global.window。
+async function runTestsO() {
+  if (!(pagerInfoFn && pagerRowFn && global.pagerCandidates && global.elClickable && global.clickEl && gnpSrc)) return;
+  const goToNextPageO = new Function("return (" + gnpSrc[0] + ");")();
+  // setTimeout 已由调用方压到 1ms（这里不要再包一层，否则会把 setTimeout 递归指向自己）
+
+  // ① 文案锚点法必须命中「同时含页码和箭头的那一层」，不能只认到页码小容器
+  const A = buildRealPager({ cur: 1, pages: [1, 18, 19, 20, 21, 22], ellipsis: true, works: ["next"] });
+  setRealDoc(A);
+  const iO1 = pagerInfoFn();
+  check("O ① 三级定位命中（via=anchor）", !!iO1 && iO1.via === "anchor");
+  check("O ① 当前页 = 1（PGT-num current）", !!iO1 && iO1.cur === 1);
+  check("O ① 总页数 = 22（共有 436 条 / 每页 20 条 交叉校验）", !!iO1 && iO1.total === 22);
+  check("O ① 页码列表 = 1,18,19,20,21,22", !!iO1 && iO1.pages.join(",") === "1,18,19,20,21,22");
+  check("O ① 识别出的容器包含箭头（页码容器之外）", !!iO1 && iO1.el.contains(A.nextBtn));
+
+  // ② 目标页不在页码窗口里、箭头既无 next 类名也无箭头文本 → 位置法必须找到它
+  const candsO = global.pagerCandidates(2);
+  check("O ② 候选表非空（v2.8 现场就是这里空掉 → 只剩 scroll）", candsO.length >= 1);
+  check("O ② 位置法认出「最大页码之后的元素」= 真箭头", candsO.length >= 1 && candsO[0].el === A.nextBtn && /after-last/.test(candsO[0].sel));
+  const rO1 = await goToNextPageO(2, "sig1", null);
+  check("O ② 点位置法候选 → 翻页成功", rO1.clicked === true && A.nextBtn.clicked === 1);
+  // 注意：该形态里页码窗口是 1 … 18..22，本来就没有「2」这个页码元素，
+  // 所以翻过去之后 pagerInfo 读不出当前页（cur=0）——此时抓取循环会用「已抓页数 + 1」兜底
+  check("O ② 翻页后已是第 2 页（页码元素不存在时 cur 读不回，属预期）", A.st.cur === 2 && rO1.clicked === true);
+
+  // ③ 窗口里有目标页码 → 依然首选精确点页码（不点箭头）
+  const B = buildRealPager({ cur: 1, pages: [1, 2, 3, 4, 5, 22], works: ["num:4"] });
+  setRealDoc(B);
+  const candsB = global.pagerCandidates(4);
+  check("O ③ 首选精确页码 4", candsB.length >= 1 && candsB[0].sel === "pager-num:4" && candsB[0].el === B.nums[3]);
+  const rO2 = await goToNextPageO(4, "sig1", null);
+  check("O ③ 点页码 4 成功且不碰箭头", rO2.clicked === true && B.nums[3].clicked === 1 && B.nextBtn.clicked === 0);
+
+  // ④ 连「每页 20 条」文案都没有（锚点法失效）→ 结构法仍要认出页码容器
+  const C = buildRealPager({ cur: 3, pages: [1, 2, 3, 4, 5, 22], works: ["next"], withSizeText: false });
+  setRealDoc(C, "共有 436 条");
+  const rowC = pagerRowFn();
+  check("O ④ 无文案锚点时退化到结构法（via=struct）", !!rowC && rowC.via === "struct");
+  const candsC = global.pagerCandidates(4);
+  check("O ④ 结构法范围外也能靠「父容器放宽」找到箭头", candsC.length >= 1 && candsC.some((c) => c.el === C.nextBtn));
+
+  // ⑤ 分页器诊断必须能一次说清「认到了什么」
+  setRealDoc(A);
+  const dump = pagerDumpFn();
+  check("O ⑤ pagerDump 输出识别方式/页码/箭头候选", !!dump && dump.via === "anchor" && dump.nums.length === 6 && dump.rowHtml.indexOf("PGT-nums-wrap") !== -1);
+  check("O ⑤ pagerDump 带上「共有 N 条 / 每页 M 条」原文", dump.countText.indexOf("436") !== -1 && dump.pageSizeText.indexOf("20") !== -1);
+
+  // ⑥ pageKey 指纹：订单号序列（判定「真翻页」的可靠依据）
+  global.document = {
+    querySelectorAll() { return []; },
+    body: { innerText: "订单编号：260708-334286067311450 复制 订单编号：260706-628998869351942 复制" },
+  };
+  check("O ⑥ pageKey 只抽订单号、顺序稳定", pageKeyFn() === "260708-334286067311450,260706-628998869351942");
+  global.document = { querySelectorAll() { return []; }, body: { innerText: "没有任何订单号" } };
+  check("O ⑥ 页面没有订单号 → 空串（调用方退回文本签名）", pageKeyFn() === "");
+}
+
+// ================================================================
 console.log("[K] 页面内抓取循环（grabAllInPage）：逐页抓取 / 末页停止 / 空表重试 / 未注入报错");
 (async () => {
   const realST = global.setTimeout;
   global.setTimeout = (fn) => realST(fn, 1); // 把循环里的等待压到 1ms，测试秒级完成
+  await runTestsO(); // v2.9 分页器真实结构（必须串行，避免互踩 global.document/window）
   const gapSrc = src.match(/async function grabAllInPage\(roleKeywords, fields, maxPages\) \{[\s\S]*?\n\}/);
   if (!gapSrc) { check("K 找到 grabAllInPage 源码", false); }
   else {
@@ -767,6 +983,85 @@ console.log("[K] 页面内抓取循环（grabAllInPage）：逐页抓取 / 末�
     // ⑥ 没有分页条、没有箭头 → 不许凭空造候选（防误点表格里的数字）
     setPagerDoc(null, [], "共有 3 条 每页 20 条");
     check("N ⑥ 无分页条无箭头 → 候选为空", pagerCandidates(2).length === 0);
+  }
+
+  // ============================================================
+  console.log("[P] v2.9 抓取循环防错：假翻页识别 / 跳页保护 / 订单号指纹兜底");
+  {
+    const grabAllInPageP = new Function("return (" + gapSrc[0] + ");")();
+    const oid = (n) => "260710-" + (334286067311000 + n * 7); // 6 位-15 位 订单号形态
+
+    // ① 假翻页：页面文本每次都变（时间戳/角标噪声），但订单号没变 → 不能把同一页当新页入库
+    let noise = 0;
+    global.window = {
+      __IH_PAGE: {
+        extractTables: () => ({ tables: [{ headers: ["订单号"], rows: [[oid(1)]], rowCount: 1 }] }),
+        pageSignature: () => "noise-" + (noise++),
+        pageKey: () => oid(1),
+        pagerInfo: () => ({ cur: 1, total: 22, pages: [], nums: [], via: "struct" }),
+        clickNextPage: () => ({ clicked: true, sel: "next" }),
+      },
+    };
+    const rP1 = await grabAllInPageP({}, [], 200);
+    check("P ① 假翻页（文本噪声变了、订单号没变）→ 只入库 1 页并说明原因",
+      rP1.total === 1 && rP1.note.indexOf("完全相同") !== -1);
+
+    // ② 真翻页：订单号随页码变化 → 正常抓满 3 页、末页正常收尾
+    let cur2 = 1;
+    global.window = {
+      __IH_PAGE: {
+        extractTables: () => ({ tables: [{ headers: ["订单号"], rows: [[oid(cur2)]], rowCount: 1 }] }),
+        pageSignature: () => "sig" + cur2,
+        pageKey: () => oid(cur2),
+        pagerInfo: () => ({ cur: cur2, total: 3, pages: [1, 2, 3], nums: [], via: "struct" }),
+        clickPageNumber: (n) => { cur2 = n; return { clicked: true, sel: "pager-num:" + n }; },
+        goToNextPage: async (t) => {
+          if (t > 3) return { clicked: false, sel: "", reason: "已到最后一页", tried: [] };
+          cur2 = t;
+          return { clicked: true, sel: "pager-num:" + t, page: t, mismatch: false, tried: [] };
+        },
+      },
+    };
+    const rP2 = await grabAllInPageP({}, [], 200);
+    check("P ② 订单号变化 → 正常抓满 3 页", rP2.total === 3);
+    check("P ② 抓取顺序 1,2,3（不重复不漏页）",
+      window.__IH_GRAB.pages.map((p) => p.tables[0].rows[0][0]).join("|") === [oid(1), oid(2), oid(3)].join("|"));
+    check("P ② 末页正常收尾", rP2.note.indexOf("已到最后一页") !== -1);
+
+    // ③ 跳页保护：目标第 2 页却跳到第 9 页，且点不回第 2 页 → 必须停下并说明（绝不静默漏页）
+    let cur3 = 1;
+    global.window = {
+      __IH_PAGE: {
+        extractTables: () => ({ tables: [{ headers: ["订单号"], rows: [[oid(cur3)]], rowCount: 1 }] }),
+        pageSignature: () => "s" + cur3,
+        pageKey: () => oid(cur3),
+        pagerInfo: () => ({ cur: cur3, total: 22, pages: [], nums: [], via: "anchor" }),
+        clickPageNumber: () => null,
+        goToNextPage: async () => { cur3 = 9; return { clicked: true, sel: "pager-num:9", page: 9, mismatch: true, tried: [] }; },
+      },
+    };
+    const rP3 = await grabAllInPageP({}, [], 200);
+    check("P ③ 跳页保护：目标 2 实际到 9 → 停止并说明",
+      rP3.total === 1 && rP3.note.indexOf("跳页") !== -1);
+
+    // ④ 分页器读不出当前页（页码窗口里没有当前页）→ 目标回退为「已抓页数 + 1」
+    let cur4 = 1;
+    global.window = {
+      __IH_PAGE: {
+        extractTables: () => ({ tables: [{ headers: ["订单号"], rows: [[oid(cur4)]], rowCount: 1 }] }),
+        pageSignature: () => "x" + cur4,
+        pageKey: () => oid(cur4),
+        pagerInfo: () => ({ cur: 0, total: 3, pages: [], nums: [], via: "anchor" }),
+        clickPageNumber: () => null,
+        goToNextPage: async (t) => {
+          if (t > 3) return { clicked: false, sel: "", reason: "已到最后一页", tried: [] };
+          cur4 = t;
+          return { clicked: true, sel: "next", page: 0, mismatch: false, tried: [] };
+        },
+      },
+    };
+    const rP4 = await grabAllInPageP({}, [], 200);
+    check("P ④ 读不出当前页时按「已抓页数 + 1」推进，仍抓满 3 页", rP4.total === 3);
   }
 
   global.setTimeout = realST;

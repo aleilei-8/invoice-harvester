@@ -544,18 +544,73 @@ function extractTables(roleKeywords, fields) {
 //   ‹  1  18  19  20  21  22  ›        共有 436 条  每页 20 条
 // 若在全页面范围内找「纯数字元素」，数量列（1/3）、消息角标（17）、站内信（3）、时间片段
 // 都会被当成页码候选 → 点到无关元素 → 页面不变 → 循环误判结束（这是「抓全部页只抓到 1 页」的元凶之一）。
-// 因此先按「容器」结构定位分页条：一个不含 table 的容器，其直接子元素里有 ≥2 个互不相同的纯数字。
-function pagerInfo() {
+// 因此先按「容器」结构定位分页条。
+//
+// v2.9（用户第二次实测：抓 3 页后卡死，浮层诊断显示「已尝试：pager:[class*="next"]:skipped /
+// pager:[class*="next"]:skipped / scroll」）证明**只有结构法远远不够**：那个时刻连一个页码候选
+// 都没生成（分页条重渲染后「数字不再是容器的直接子元素」/ 页码窗口里没有目标页），
+// 于是整个候选表只剩两个被判定 disabled 的 next 候选 → 直接掉到「滚动到底」这条死路。
+// 现在改成三级定位，任一级命中即可：
+//   ① 文案锚点法：「每页 N 条」所在的最内层元素 → 向上找含 ≥2 个页码的祖先（最稳）
+//   ② 结构法：不含 table、直接子元素里有 ≥2 个互不相同的纯数字的容器（v2.7/v2.8 沿用的那条）
+//   ③ 反向法：全页面「可见、不在表格内、不在本扩展浮层内」的纯数字元素 → 共同祖先（最宽）
+function pagerRow() {
   const vis = (el) => !!(el && el.offsetParent !== null);
+  const clean = (s) => String(s == null ? "" : s).replace(/\s+/g, "");
   const numOf = (el) => {
-    const t = String((el && el.innerText) || "").trim();
+    const t = clean(el && el.innerText);
     return /^\d{1,4}$/.test(t) ? parseInt(t, 10) : 0;
   };
+  const q = (r, s) => {
+    try { return (r && r.querySelectorAll) ? Array.prototype.slice.call(r.querySelectorAll(s)) : []; } catch (e) { return []; }
+  };
+  const ours = (el) => { try { return !!(el && el.closest && el.closest("#__ih_grab_overlay")); } catch (e) { return false; } };
+  const inTable = (el) => { try { return !!(el && el.closest && el.closest("table")); } catch (e) { return false; } };
+  // 取容器内「最内层」的纯数字元素（页码）：若其后代里还有纯数字元素，它只是外层包装
+  function innermostNums(root) {
+    const all = q(root, "li, a, button, span, i, b, em, div, label, strong");
+    const nums = all.filter((e) => numOf(e) > 0);
+    return nums.filter((e) => {
+      for (let i = 0; i < nums.length; i++) {
+        const o = nums[i];
+        if (o === e) continue;
+        try { if (e.contains && e.contains(o)) return false; } catch (err) { /* 忽略 */ }
+      }
+      return true;
+    });
+  }
+  function uniqOf(nums) {
+    const u = [];
+    for (let i = 0; i < nums.length; i++) { const n = numOf(nums[i]); if (n > 0 && u.indexOf(n) === -1) u.push(n); }
+    return u;
+  }
+  // ① 文案锚点法：分页条旁永远有「每页 N 条」，从这里向上找，一定能找到页码所在容器
+  try {
+    let anchor = null;
+    const cands = q(document, "div, span, em, label, b, strong, i, a, button, li, section, nav, p, ul, ol");
+    for (const el of cands) {
+      if (!el || ours(el) || inTable(el)) continue;
+      const t = clean(el.innerText);
+      if (!t || t.length > 40 || !/每页\d+条/.test(t)) continue;
+      if (anchor && clean(anchor.innerText).length <= t.length) continue;
+      anchor = el;
+    }
+    if (anchor) {
+      let up = anchor, lv = 0;
+      while (up && lv++ < 8) {
+        const nums = innermostNums(up);
+        if (uniqOf(nums).length >= 2) return { el: up, nums: nums, uniq: uniqOf(nums), via: "anchor" };
+        up = up.parentElement || null;
+      }
+    }
+  } catch (e) { /* 忽略 */ }
+  // ② 结构法
   let list = [];
   try { list = Array.from(document.querySelectorAll("div, ul, ol, nav, section, span")); } catch (e) { list = []; }
   let best = null;
   for (const el of list) {
     if (el.closest && el.closest("table")) continue; // 表格里的数字单元格不是分页器
+    if (el && ours && ours(el)) continue;             // 也不能是本扩展自己的进度浮层
     const kids = Array.from(el.children || []);
     if (kids.length < 2 || kids.length > 40) continue;
     const nums = kids.filter((k) => numOf(k) > 0 && vis(k));
@@ -569,22 +624,87 @@ function pagerInfo() {
     const score = bonus + uniq.length * 4 + nums.length - kids.length;
     if (!best || score > best.score) best = { el, nums, uniq, score };
   }
-  if (!best) return null;
-  let cur = 0;
-  for (const k of best.nums) {
+  if (!best) return reverseRow(); // ③ 反向法
+  return { el: best.el, nums: best.nums, uniq: best.uniq, via: "struct" };
+}
+
+// ③ 反向法（最后的兜底）：分页条五花八门，但「页码 = 一堆相邻的纯数字」永远成立。
+// 取全页面「可见、不在表格内、不在本扩展浮层内」的纯数字元素的共同祖先。
+function reverseRow() {
+  const vis = (el) => !!(el && el.offsetParent !== null);
+  const numOf = (el) => {
+    const t = String((el && el.innerText) || "").trim();
+    return /^\d{1,4}$/.test(t) ? parseInt(t, 10) : 0;
+  };
+  const ours = (el) => { try { return !!(el && el.closest && el.closest("#__ih_grab_overlay")); } catch (e) { return false; } };
+  const inTable = (el) => { try { return !!(el && el.closest && el.closest("table")); } catch (e) { return false; } };
+  const uniqOf = (nums) => {
+    const u = [];
+    for (let i = 0; i < nums.length; i++) { const n = numOf(nums[i]); if (n > 0 && u.indexOf(n) === -1) u.push(n); }
+    return u;
+  };
+  let all = [];
+  try {
+    all = Array.prototype.slice.call(document.querySelectorAll("li, a, button, span, i, b, em, div, label, strong"))
+      .filter((e) => numOf(e) > 0 && vis(e) && !ours(e) && !inTable(e));
+  } catch (e) { all = []; }
+  if (all.length < 2 || uniqOf(all).length < 2) return null;
+  let up = all[0], lv = 0;
+  while (up && lv++ < 10) {
+    const inside = [];
+    for (let i = 0; i < all.length; i++) {
+      try { if (up.contains && up.contains(all[i])) inside.push(all[i]); } catch (e) { /* 忽略 */ }
+    }
+    if (uniqOf(inside).length >= 2) return { el: up, nums: inside, uniq: uniqOf(inside), via: "reverse" };
+    up = up.parentElement || null;
+  }
+  return null;
+}
+
+// ===== 注入：分页器完整信息（当前页 / 总页数 / 页码列表 / 用的是哪级识别法）=====
+function pagerInfo() {
+  const clean = (s) => String(s == null ? "" : s).replace(/\s+/g, "");
+  const numOf = (el) => {
+    const t = clean(el && el.innerText);
+    return /^\d{1,4}$/.test(t) ? parseInt(t, 10) : 0;
+  };
+  let row = null;
+  try { row = pagerRow(); } catch (e) { row = null; }
+  if (!row) return null;
+  const nums = row.nums || [];
+  const uniq = (row.uniq && row.uniq.length) ? row.uniq : [];
+  let cur = 0, total = 0;
+  // 当前页：① 自身/父级 class 含 active/current ② aria-current ③ 样式与兄弟明显不同的那个
+  for (const k of nums) {
     const c = String(k.className || "");
-    let aria = "";
+    let pc = "", aria = "";
+    try { pc = String((k.parentElement && k.parentElement.className) || ""); } catch (e) { pc = ""; }
     try { aria = String((k.getAttribute && k.getAttribute("aria-current")) || ""); } catch (e) { aria = ""; }
-    if (/(^|[^a-z])(active|current|selected|checked)([^a-z]|$)/i.test(c) || aria === "page") {
+    if (/(^|[^a-z])(active|current|selected|checked)([^a-z]|$)/i.test(c + " " + pc) || aria === "page" || aria === "true") {
       cur = numOf(k);
       break;
     }
   }
-  let total = 0;
-  best.uniq.forEach((n) => { if (n > total) total = n; });
-  // 总页数用「共有 N 条 / 每页 M 条」交叉校验（分页器被省略号截断时更准）
+  if (!cur) {
+    // 样式兜底：自研分页器常常只给当前页改背景/描边，连 active 类都不加
+    try {
+      const keys = nums.map((el) => {
+        const cs = (typeof window !== "undefined" && window.getComputedStyle) ? window.getComputedStyle(el) : null;
+        if (!cs) return "";
+        return [cs.backgroundColor, cs.color, cs.borderColor, cs.fontWeight].join("|");
+      });
+      if (keys.length >= 2 && keys.indexOf("") === -1) {
+        const cnt = {};
+        keys.forEach((k) => { cnt[k] = (cnt[k] || 0) + 1; });
+        const singles = Object.keys(cnt).filter((k) => cnt[k] === 1);
+        if (singles.length === 1) cur = numOf(nums[keys.indexOf(singles[0])]);
+      }
+    } catch (e) { /* 忽略 */ }
+  }
+  for (let i = 0; i < uniq.length; i++) { if (uniq[i] > total) total = uniq[i]; }
+  // 总页数用「共有 N 条 / 每页 M 条」交叉校验（页码被省略号截断时更准）
   try {
-    const t = String((document.body && document.body.innerText) || "").replace(/\s+/g, " ");
+    const t = clean((document.body && document.body.innerText) || "");
     const tm = t.match(/共\s*(?:有)?\s*([\d,]+)\s*条/);
     const pm = t.match(/每页\s*(\d+)\s*条/);
     if (tm && pm) {
@@ -596,7 +716,66 @@ function pagerInfo() {
       }
     }
   } catch (e) { /* 忽略 */ }
-  return { el: best.el, nums: best.nums, pages: best.uniq, cur, total };
+  return { el: row.el, nums: nums, pages: uniq, cur: cur, total: total, via: row.via || "" };
+}
+
+// ===== 注入：分页器结构诊断（万一还是认不出分页条，回传这一段即可精确定位）=====
+function pagerDump() {
+  const clean = (s) => String(s == null ? "" : s).replace(/\s+/g, " ").trim();
+  const q = (r, s) => {
+    try { return (r && r.querySelectorAll) ? Array.prototype.slice.call(r.querySelectorAll(s)) : []; } catch (e) { return []; }
+  };
+  const info = (el) => {
+    let rect = null;
+    const chain = [];
+    try {
+      const r = el.getBoundingClientRect && el.getBoundingClientRect();
+      if (r) rect = [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height)];
+    } catch (e) { rect = null; }
+    try {
+      let p = el, n = 0;
+      while (p && n++ < 3) { chain.push(String(p.tagName || "") + "." + String(p.className || "")); p = p.parentElement; }
+    } catch (e) { /* 忽略 */ }
+    return {
+      tag: String(el.tagName || ""),
+      cls: String(el.className || "").slice(0, 90),
+      txt: clean(el.innerText).slice(0, 24),
+      rect: rect,
+      chain: chain,
+    };
+  };
+  const out = { url: "", via: "", rowText: "", rowHtml: "", nums: [], arrows: [], countText: "", pageSizeText: "", bodyHead: "" };
+  try { out.url = String(location.href); } catch (e) { /* 忽略 */ }
+  try {
+    const row = pagerRow();
+    if (row) {
+      out.via = row.via || "";
+      out.rowText = clean(row.el.innerText).slice(0, 300);
+      try { out.rowHtml = String(row.el.outerHTML || "").slice(0, 1500); } catch (e) { out.rowHtml = ""; }
+      out.nums = (row.nums || []).slice(0, 30).map(info);
+    } else {
+      out.via = "none";
+    }
+  } catch (e) { out.via = "err:" + (e && e.message ? e.message : String(e)); }
+  try {
+    const t = clean((document.body && document.body.innerText) || "");
+    out.countText = (t.match(/共\s*(?:有)?\s*[\d,]+\s*条/) || [""])[0];
+    out.pageSizeText = (t.match(/每页\s*\d+\s*条/) || [""])[0];
+    out.bodyHead = t.slice(0, 300);
+  } catch (e) { /* 忽略 */ }
+  try {
+    const ar = [];
+    for (const el of q(document, "a, button, li, span, i, div, b, em, strong, svg")) {
+      if (ar.length >= 40) break;
+      const c = String(el.className || "");
+      const tx = clean(el.innerText);
+      if (!/next|prev|arrow|pag|page|PGT|forward|right|more/i.test(c) &&
+        ["下一页", "下页", "›", "»", "❯", "→", ">", "...", "…"].indexOf(tx) === -1) continue;
+      ar.push(info(el));
+    }
+    out.arrows = ar;
+  } catch (e) { /* 忽略 */ }
+  return out;
 }
 
 // 点击分页器里的指定页码（返回 { clicked, sel } 或 null；未识别到分页器时返回 null）
@@ -620,19 +799,23 @@ function clickPageNumber(n) {
 // 对策：候选元素按可靠度排序 → 逐个点击 → 每个点完等页面「真的换了页」才算成功。
 
 // 是否禁用：class 含 disabled/disable（兼容 PGT-next-disabled / xxx_disabled）
-// 或带 aria-disabled / disabled 属性，或近 4 层祖先带禁用类
+// 或带 aria-disabled / disabled 属性，或近 2 层祖先带禁用类
+// v2.9 收紧两处：① 祖先只看 2 层（v2.8 看 4 层，分页条外面的通用包装类一旦含 disable 会把
+// 所有候选一起误杀）；② 遇到本扩展自己的进度浮层立即停止上溯。
 function isDisabled(el) {
   if (!el) return true;
-  if (/disabled|disable|unclickable/i.test(String(el.className || ""))) return true;
+  const hard = (c) => /(^|[^a-z])(disabled|disable|unclickable)([^a-z]|$)/i.test(String(c == null ? "" : c));
+  if (hard(el.className)) return true;
   try {
-    if (el.getAttribute && el.getAttribute("aria-disabled") === "true") return true;
+    if (el.getAttribute && (el.getAttribute("aria-disabled") === "true" || el.getAttribute("aria-disabled") === "1")) return true;
     if (el.hasAttribute && el.hasAttribute("disabled")) return true;
   } catch (e) { /* 忽略 */ }
   if (el.disabled === true) return true;
   try {
     let p = el.parentElement || null, n = 0;
-    while (p && n++ < 4) {
-      if (/disabled|disable/i.test(String(p.className || ""))) return true;
+    while (p && n++ < 2) {
+      if (p.id === "__ih_grab_overlay") return false;
+      if (hard(p.className)) return true;
       p = p.parentElement || null;
     }
   } catch (e) { /* 忽略 */ }
@@ -717,14 +900,15 @@ function clickEl(el, mode) {
 }
 
 // 生成「翻到目标页」的候选元素，按可靠度从高到低：
-//   ① 分页条内文本 == 目标页码（最精确：点中就是那一页）
-//   ② 当前页 li 往后的第一个非省略号兄弟（结构位置最贴近分页器真实逻辑）
-//   ③ 分页条内 next 类名/属性元素
+//   ① 分页条内文本 == 目标页码（点它 + 它的父级）
+//   ② 当前页码元素往后的第一个非省略号兄弟（结构位置最贴近分页器真实逻辑）
+//   ③ 分页条内 next / arrow / forward 类名或语义属性
 //   ④ 分页条内箭头文本元素（含其父 li：handler 有时绑在父级）
-//   ⑤ 全局 next 类名/属性
-//   ⑥ 全局箭头文本
-//   ⑦ 全局「激活页码 + 1」（无分页条容器时的兜底）
-//   ⑧ 分页条内「最后一个非页码/非省略号元素」（位置启发式兜底）
+//   ⑤ **位置法**：分页条里最大页码之后的那个元素（很多自研分页器的箭头没有任何可辨识 class）
+//   ⑥ 分页条内「最后一个非页码/非省略号元素」
+//   ⑦ 全局 next 类名/属性 → 全局箭头文本 → 全局「激活页码 + 1」（沿用 v2.7/v2.8）
+//   ⑧ **全局数字兜底**：页面上任何「文本 == 目标页码」且不在表格内、不在浮层内的可见元素
+//      （v2.8 的致命缺口：分页条一旦认错，候选表就是空的，只剩「滚动到底」这条死路）
 function pagerCandidates(targetPage) {
   const out = [];
   const seen = [];
@@ -739,40 +923,92 @@ function pagerCandidates(targetPage) {
   const txt = (el) => String((el && (el.innerText != null ? el.innerText : el.textContent)) || "").replace(/\s+/g, "");
   const arrowTexts = ["下一页", "下页", "后一页", "›", "»", "❯", "→", ">"];
   const isEllipsis = (t) => !t || t === "..." || t === "…" || t === "•••" || t === "···";
-  let pg = null;
+  const ours = (el) => { try { return !!(el && el.closest && el.closest("#__ih_grab_overlay")); } catch (e) { return false; } };
+  const inTable = (el) => { try { return !!(el && el.closest && el.closest("table")); } catch (e) { return false; } };
+  let pg = null, row = null;
   try { pg = pagerInfo(); } catch (e) { pg = null; }
-  if (pg) {
-    const cur = pg.cur || 0;
-    const want = (targetPage && targetPage > 1) ? targetPage : (cur > 0 ? cur + 1 : 0);
-    const w = String(want);
-    for (const k of pg.nums) { if (txt(k) === w) push(k, "pager-num:" + want, true); }
+  try { row = pagerRow(); } catch (e) { row = null; }
+  const scope = (row && row.el) || (pg && pg.el) || null;
+  const rowNums = (row && row.nums) || (pg && pg.nums) || [];
+  const cur = (pg && pg.cur) || 0;
+  const want = (targetPage && targetPage > 1) ? targetPage : (cur > 0 ? cur + 1 : 0);
+  const w = String(want);
+  if (scope) {
+    // ① 分页条内精确命中目标页码
+    if (want) {
+      for (const k of rowNums) {
+        if (txt(k) !== w) continue;
+        push(k, "pager-num:" + want, true);
+        if (k.parentElement) push(k.parentElement, "pager-num-parent:" + want, true);
+      }
+    }
+    // ② 当前页码之后的第一个非省略号兄弟
     let curEl = null;
-    for (const k of pg.nums) { if (cur > 0 && txt(k) === String(cur)) { curEl = k; break; } }
+    for (const k of rowNums) { if (cur > 0 && txt(k) === String(cur)) { curEl = k; break; } }
     if (curEl) {
       let sib = curEl.nextElementSibling || null, g = 0;
       while (sib && g++ < 8) {
         const t = txt(sib);
-        if (!isEllipsis(t)) {
-          if (/^\d{1,4}$/.test(t)) { if (want && parseInt(t, 10) === want) push(sib, "pager-sib-num:" + t, true); }
-          else push(sib, "pager-sib:" + t.slice(0, 4), false);
-          break;
+        if (isEllipsis(t)) { sib = sib.nextElementSibling || null; continue; }
+        if (/^\d{1,4}$/.test(t)) {
+          if (want && parseInt(t, 10) === want) push(sib, "pager-sib-num:" + t, true);
+        } else {
+          push(sib, "pager-sib:" + t.slice(0, 4), false);
+          if (sib.parentElement) push(sib.parentElement, "pager-sib-parent:" + t.slice(0, 4), false);
         }
-        sib = sib.nextElementSibling || null;
+        break;
       }
     }
-    const pgSels = ['[class*="next"]', '[class*="Next"]', '[class*="arrow-right"]', '[class*="forward"]', "[aria-label*=下一页]", "[title*=下一页]", "[aria-label*=Next]", "[title*=Next]"];
-    for (const s of pgSels) {
-      for (const el of q(pg.el, s)) push(el, "pager:" + s, false);
+    // 箭头扫描的候选范围：先分页条本身，再放宽到它的父容器。
+    // 为什么需要放宽：结构法常常只认到「页码那一小撮」的容器（页码的直接父级），
+    // 而左右箭头在那个容器**外面**（真实截图形态）。不放宽就会「页码找到了、箭头却找不到」，
+    // 页码窗口里又没有目标页 → 候选表为空 → 直接掉到滚动兜底（用户第二次实测的现场）。
+    const scopes = [scope];
+    const pgSels = ['[class*="next"]', '[class*="Next"]', '[class*="arrow"]', '[class*="Arrow"]', '[class*="forward"]', '[class*="Forward"]', '[class*="right"]', '[class*="Right"]', "[aria-label*=下一页]", "[title*=下一页]", "[aria-label*=Next]", "[title*=Next]"];
+    try {
+      const up = scope.parentElement;
+      if (up && (!up.parentElement || String(txt(up)).length <= 200)) scopes.push(up);
+    } catch (e) { /* 忽略 */ }
+    for (let si = 0; si < scopes.length; si++) {
+      const sc = scopes[si];
+      const tag = si === 0 ? "pager:" : "pagerUp:";
+      // ③ 箭头（类名 / 语义属性）
+      for (const s of pgSels) {
+        for (const el of q(sc, s)) push(el, tag + s, false);
+      }
+      // ④ 箭头文本（含父级）
+      for (const el of q(sc, "li, a, button, span, i, div, svg")) {
+        const t = txt(el);
+        if (arrowTexts.indexOf(t) === -1) continue;
+        push(el, tag + "text:" + t, false);
+        if (el.parentElement) push(el.parentElement, tag + "text-parent:" + t, false);
+      }
+      // ⑤ 位置法：最大页码之后的下一个元素。
+      // 先在同级里找；同级没有（页码被包在子容器里）就沿着父级往上，取「那个包装容器的下一个兄弟」。
+      // 注意：这里**不能**把「没有文本」当成省略号跳过——图标型箭头本来就没有文本，
+      // 恰恰是要找的目标（用户现场那个箭头就是既无 class 关键字、又无文本）。
+      if (rowNums.length) {
+        let last = null, lastN = 0;
+        for (const k of rowNums) { const n = parseInt(txt(k), 10); if (n > lastN) { lastN = n; last = k; } }
+        let node = last, found = false, g = 0;
+        while (node && !found && g++ < 5) {
+          let sib = node.nextElementSibling || null, h = 0;
+          while (sib && h++ < 5) {
+            const t = txt(sib);
+            if (t === "..." || t === "…" || t === "•••" || t === "···") { sib = sib.nextElementSibling || null; continue; }
+            push(sib, "pager-after-last:" + t.slice(0, 4), false);
+            if (sib.parentElement) push(sib.parentElement, "pager-after-last-parent", false);
+            found = true;
+            break;
+          }
+          node = node.parentElement || null;
+        }
+      }
     }
-    for (const el of q(pg.el, "li, a, button, span, i, div, svg")) {
-      const t = txt(el);
-      if (arrowTexts.indexOf(t) === -1) continue;
-      push(el, "pager-text:" + t, false);
-      if (el.parentElement) push(el.parentElement, "pager-text-parent:" + t, false);
-    }
+    // ⑥ 分页条内「最后一个非页码/非省略号元素」
     if (!out.length) {
-      const kids = [];
-      try { kids = Array.prototype.slice.call(pg.el.children || []); } catch (e) { kids = []; }
+      let kids = [];
+      try { kids = Array.prototype.slice.call(scope.children || []); } catch (e) { kids = []; }
       for (let i = kids.length - 1; i >= 0; i--) {
         const t = txt(kids[i]);
         if (isEllipsis(t) || /^\d{1,4}$/.test(t)) continue;
@@ -804,6 +1040,15 @@ function pagerCandidates(targetPage) {
     const nx = numsAll.filter((el) => parseInt(txt(el), 10) === n + 1)[0];
     push(nx, "page+" + n, true);
   }
+  // ⑧ 全局数字兜底（最后一条路）
+  if (want) {
+    for (const el of q(document, "li, a, button, span, i, b, em, div, label, strong")) {
+      if (txt(el) !== w) continue;
+      if (inTable(el) || ours(el)) continue;
+      push(el, "num-any:" + want, true);
+      if (el.parentElement) push(el.parentElement, "num-any-parent:" + want, true);
+    }
+  }
   return out;
 }
 
@@ -818,32 +1063,46 @@ async function goToNextPage(targetPage, beforeSig, onTry) {
   const tried = [];
   if (!P) return { clicked: false, sel: "", reason: "页面函数库未注入", tried: tried };
   const sig = () => { try { return P.pageSignature ? P.pageSignature() : ""; } catch (e) { return ""; } };
+  const keyOf = () => { try { return P.pageKey ? P.pageKey() : ""; } catch (e) { return ""; } };
   const curOf = () => { try { const i = P.pagerInfo ? P.pagerInfo() : null; return i && i.cur ? i.cur : 0; } catch (e) { return 0; } };
   const base = beforeSig != null ? beforeSig : sig();
+  const baseKey = keyOf();
   const tell = (label) => { if (typeof onTry === "function") { try { onTry(label); } catch (e) { /* 忽略 */ } } };
+  // 「真的换页了吗」的判定：优先用「页面上的订单号序列」——
+  // 它不会像文本签名那样被时间戳/角标/渲染时序骗到（v2.8 用文本签名，会出现「同一页被当成
+  // 好几页」的假成功，也会因为噪声把没翻动的页当成翻动了）。拿不到订单号时才退回文本签名。
+  const moved = () => {
+    const k2 = keyOf();
+    if (baseKey && k2) return k2 !== baseKey;
+    const s = sig();
+    return !!(s && s !== base);
+  };
+  const waitMoved = async (tries) => {
+    for (let k = 0; k < tries; k++) { await sleep(400); if (moved()) return true; }
+    return false;
+  };
   if (targetPage && curOf() === targetPage) return { clicked: true, sel: "already:" + targetPage, page: targetPage, tried: tried };
   const cands = pagerCandidates(targetPage);
   const rounds = [
-    { mode: "native", max: 6, label: "" },
-    { mode: "events", max: 3, label: "（事件序列）" }
+    { mode: "native", max: 6, label: "", force: false },
+    { mode: "events", max: 3, label: "（事件序列）", force: false },
+    // 强制轮：连「看起来被禁用」的候选也点一次。
+    // 用户第二次实测现场就是「两个 next 候选都被判 disabled → 一个都不点 → 直接掉到滚动兜底」，
+    // 而很多自研分页器的 disabled 只是加了样式，点击 handler 仍在。
+    { mode: "events", max: 3, label: "（强制）", force: true }
   ];
   for (const rd of rounds) {
     let n = 0;
     for (const c of cands) {
       if (n >= rd.max) break;
-      if (!elClickable(c.el)) { tried.push(c.sel + ":skipped"); continue; }
+      const okClick = elClickable(c.el);
+      if (!okClick && !rd.force) { tried.push(c.sel + ":skipped"); continue; }
       if (targetPage && curOf() === targetPage) return { clicked: true, sel: "already:" + targetPage, page: targetPage, tried: tried };
       n++;
       clickEl(c.el, rd.mode);
-      tried.push(c.sel + rd.label);
+      tried.push(c.sel + rd.label + (okClick ? "" : ":force"));
       tell(c.sel + rd.label);
-      let moved = false;
-      for (let k = 0; k < 6; k++) {
-        await sleep(400);
-        const s = sig();
-        if (s && s !== base) { moved = true; break; }
-      }
-      if (moved) {
+      if (await waitMoved(6)) {
         const page = curOf();
         return { clicked: true, sel: c.sel + rd.label, page: page, mismatch: !!(targetPage && page && page !== targetPage), tried: tried };
       }
@@ -872,11 +1131,7 @@ async function goToNextPage(targetPage, beforeSig, onTry) {
         );
         tried.push("jump-input:" + targetPage);
         tell("跳页输入框:" + targetPage);
-        for (let k = 0; k < 6; k++) {
-          await sleep(400);
-          const s = sig();
-          if (s && s !== base) return { clicked: true, sel: "jump-input:" + targetPage, page: curOf(), tried: tried };
-        }
+        if (await waitMoved(6)) return { clicked: true, sel: "jump-input:" + targetPage, page: curOf(), tried: tried };
       } catch (e) { /* 继续尝试 */ }
     }
   }
@@ -886,11 +1141,7 @@ async function goToNextPage(targetPage, beforeSig, onTry) {
     window.scrollTo(0, (document.body && document.body.scrollHeight) || 999999);
     const sc = document.scrollingElement;
     if (sc) sc.scrollTop = sc.scrollHeight;
-    for (let k = 0; k < 6; k++) {
-      await sleep(400);
-      const s = sig();
-      if (s && s !== base) return { clicked: true, sel: "scroll", page: curOf(), tried: tried };
-    }
+    if (await waitMoved(6)) return { clicked: true, sel: "scroll", page: curOf(), tried: tried };
   } catch (e) { /* 忽略 */ }
   return { clicked: false, sel: "", reason: "所有翻页方式都试过但页面未变化", tried: tried };
 }
@@ -947,11 +1198,38 @@ function pageSignature() {
   return txt.slice(0, 3000);
 }
 
+// ===== 注入：页面「身份指纹」（比 pageSignature 可靠得多）=====
+// 把所有订单号（260708-334286067311450 这种 6-15 位形态）按出现顺序拼起来。
+// 用途：① 判断翻页是否真的生效；② 判断连续两页是不是同一页（防重复入库 + 防「假翻页」）。
+// 它只由订单号构成，不受时间戳、角标、渲染时序噪声影响。
+function pageKey() {
+  let t = "";
+  try { t = String((document.body && document.body.innerText) || ""); } catch (e) { t = ""; }
+  if (!t) {
+    try {
+      const ts = Array.from(document.querySelectorAll("table"));
+      for (const tb of ts) t += String(tb.innerText || "") + " ";
+    } catch (e) { /* 忽略 */ }
+  }
+  const ids = [];
+  try {
+    const re = /(\d{6}-\d{15})(?!\d)/g;
+    let m;
+    while ((m = re.exec(t)) !== null) {
+      if (ids.indexOf(m[1]) === -1) ids.push(m[1]);
+      if (ids.length >= 60) break;
+    }
+  } catch (e) { /* 忽略 */ }
+  return ids.join(",");
+}
+
 // 暴露给「页面内长任务」使用（注入到目标页面的隔离世界里）
+// ver：让弹窗能识别「页面里跑着的循环是不是当前版本的代码」（更新插件后老页面不会自动换代码）
 if (typeof window !== "undefined") {
+  window.__IH_PAGE_VER = "2.9.0";
   window.__IH_PAGE = {
-    extractTables, clickNextPage, pageSignature, pagerInfo, clickPageNumber,
-    pagerCandidates, elClickable, clickEl, goToNextPage,
+    ver: "2.9.0", extractTables, clickNextPage, pageSignature, pageKey, pagerInfo, pagerRow,
+    clickPageNumber, pagerCandidates, elClickable, clickEl, goToNextPage, pagerDump,
   };
 }
 
@@ -967,7 +1245,7 @@ if (typeof window !== "undefined") {
 //   ② 页面右上角加进度浮层：弹窗失焦被关闭后用户仍能看到进度，并可随时「停止抓取」。
 async function grabAllInPage(roleKeywords, fields, maxPages) {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  const G = { running: true, page: 0, curPage: 0, total: 0, done: false, note: "", lastClick: "", pages: [], stop: false };
+  const G = { running: true, page: 0, curPage: 0, total: 0, done: false, note: "", lastClick: "", pagerVia: "", pages: [], stop: false };
   try { window.__IH_GRAB = G; } catch (e) { /* 忽略 */ }
   const OV_ID = "__ih_grab_overlay";
   const escHtml = (s) => String(s == null ? "" : s).replace(/[&<>]/g, (c) => (c === "&" ? "&amp;" : (c === "<" ? "&lt;" : "&gt;")));
@@ -1013,7 +1291,9 @@ async function grabAllInPage(roleKeywords, fields, maxPages) {
       ? '<div style="font-weight:600;color:#39d3b4">抓取结束</div>'
       : '<div style="font-weight:600">电商订单信息助手 · 抓取全部页</div>';
     const mid = '<div>已抓 <b style="color:#ffd66b">' + count + '</b> 页 · 当前第 <b>' + curTxt + '</b> / ' + totalTxt + ' 页</div>';
-    const tip = method ? '<div style="opacity:.7;font-size:12px">翻页方式：' + escHtml(method) + '</div>' : '';
+    const tip = (method || G.pagerVia)
+      ? '<div style="opacity:.7;font-size:12px">翻页方式：' + escHtml(method || "—") + (G.pagerVia ? " · 分页器：" + escHtml(G.pagerVia) : "") + '</div>'
+      : '';
     const note = finalNote ? '<div style="margin-top:3px;color:#ffd66b">' + escHtml(finalNote) + '</div>' : '';
     const btns = finalNote
       ? '<div style="margin-top:9px"><button data-ih-close style="cursor:pointer;border:0;border-radius:6px;padding:5px 12px;background:#2b3b57;color:#dce8ff;font-size:12px">关闭</button></div>'
@@ -1050,6 +1330,7 @@ async function grabAllInPage(roleKeywords, fields, maxPages) {
     G.running = false; G.done = true; G.note = "页面函数库未注入";
     return { ok: false, note: G.note };
   }
+  G.ver = P.ver || ""; // 供弹窗判断「页面里跑的是不是当前版本的循环」
   const limit = maxPages || 200;
 
   // 翻到目标页并确认真的换了页。
@@ -1082,6 +1363,14 @@ async function grabAllInPage(roleKeywords, fields, maxPages) {
     }
     return false;
   }
+
+  // 页面身份指纹：优先用订单号序列（可靠），退化到文本签名
+  function sigKeyOf() {
+    try {
+      if (typeof P.pageKey === "function") { const k = P.pageKey(); if (k) return "K:" + k; }
+    } catch (e) { /* 忽略 */ }
+    try { return "S:" + P.pageSignature(); } catch (e) { return ""; }
+  }
   try {
     // ---- ① 读分页器：拿到「当前页 / 总页数」 ----
     let info = null;
@@ -1105,6 +1394,7 @@ async function grabAllInPage(roleKeywords, fields, maxPages) {
     ovPaint(G.curPage, G.total, 0, "");
 
     // ---- ③ 逐页抓取 ----
+    let prevKey = ""; // 上一页的「身份指纹」（订单号序列），用于识别「假翻页」
     for (let page = 1; page <= limit; page++) {
       if (G.stop) { G.note = G.note || "已手动停止"; break; }
       G.page = page;
@@ -1119,33 +1409,72 @@ async function grabAllInPage(roleKeywords, fields, maxPages) {
         G.note = "第 " + page + " 页（页面第 " + (G.curPage || "?") + " 页）未识别到表格";
         break;
       }
+      // 假翻页识别：内容与上一页完全相同 → 刚才那次翻页其实没生效，
+      // 不能再把同一页当成新页入库（否则「已抓 3 页」里可能有两页是重复的）
+      const curKey = sigKeyOf();
+      if (prevKey && curKey && curKey === prevKey) {
+        G.note = "第 " + page + " 页与上一页内容完全相同（翻页未生效），已停止以免重复；（分页器：" + (G.pagerVia || "未识别") + "）";
+        break;
+      }
+      prevKey = curKey;
       G.pages.push({ page: page, tables: data.tables });
       ovPaint(G.curPage || page, G.total, G.pages.length, G.lastClick);
 
       // ---- ④ 翻页：目标 = 「分页器当前页码 + 1」 ----
       let cur = 0, total = G.total, i3 = null;
       try { i3 = typeof P.pagerInfo === "function" ? P.pagerInfo() : null; } catch (e) { i3 = null; }
-      if (i3) { cur = i3.cur || 0; if (i3.total) total = i3.total; }
+      if (i3) { cur = i3.cur || 0; if (i3.total) total = i3.total; if (i3.via) G.pagerVia = i3.via; }
       if (cur) G.curPage = cur;
       if (total) G.total = total;
       if (total && cur && cur >= total) { G.note = "已到最后一页（共 " + total + " 页）"; break; }
-      const target = cur > 0 ? cur + 1 : page + 1;
-      const before = P.pageSignature();
-      const res = await goNext(target, before, function (lbl) {
-        G.lastClick = lbl;
-        ovPaint(G.curPage || page, G.total, G.pages.length, lbl);
-      });
+      const target = cur > 0 ? cur + 1 : G.pages.length + 1;
+      // 翻页失败允许再试一次（有些后台分页条懒渲染 / 首次点击只是聚焦）。
+      // 重试前重读分页器当前页，目标改成「新的当前页 + 1」——绝不按旧目标硬点（会跳页漏抓）。
+      let res = null;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        let tg = target;
+        if (attempt > 0) {
+          await sleep(1500);
+          let i4 = null;
+          try { i4 = typeof P.pagerInfo === "function" ? P.pagerInfo() : null; } catch (e) { i4 = null; }
+          if (i4 && i4.cur) { G.curPage = i4.cur; tg = i4.cur + 1; }
+        }
+        const before = P.pageSignature();
+        res = await goNext(tg, before, function (lbl) {
+          G.lastClick = lbl;
+          ovPaint(G.curPage || page, G.total, G.pages.length, lbl);
+        });
+        if (res && res.clicked) break;
+        if (G.stop) break;
+        // 「到最后一页 / 找不到控件」不是卡顿，重试没有意义
+        if (res && /最后一页|没有下一页|未找到/.test(res.reason || "")) break;
+      }
       if (!res || !res.clicked) {
         const why = (res && res.reason) || "未知";
-        const tail = (res && res.tried && res.tried.length) ? "（已尝试：" + res.tried.slice(0, 8).join(" / ") + "）" : "";
+        const tail = (res && res.tried && res.tried.length) ? "（已尝试：" + res.tried.slice(0, 10).join(" / ") + "）" : "";
+        const diag = "（分页器：" + (G.pagerVia || "未识别") + "，当前页 " + (G.curPage || "?") + "，目标 " + target + "）";
         // 「找不到控件 / 最后一页」是正常收尾，别吓用户；真的翻不动才报「翻页失败」
-        G.note = (/最后一页|没有下一页|未找到/.test(why) ? "没有下一页了（" + why + "）" : "翻页失败：" + why) + tail;
+        G.note = (/最后一页|没有下一页|未找到/.test(why) ? "没有下一页了（" + why + "）" : "翻页失败：" + why + diag) + tail;
         break;
       }
       G.lastClick = res.sel;
       if (res.page) G.curPage = res.page;
-      if (res.mismatch) {
-        G.note = "注意：目标第 " + target + " 页，实际到第 " + res.page + " 页（方式：" + res.sel + "）";
+      // 跳页保护：一下子跳到别的页 = 目标页码不在分页条窗口里。
+      // 先把目标页点回来；点不回来就停下并说明，绝不静默继续（否则中间那些页会被漏掉）。
+      if (res.mismatch && res.page && target && res.page !== target) {
+        let fixed = false;
+        try {
+          const back = typeof P.clickPageNumber === "function" ? P.clickPageNumber(target) : null;
+          if (back && back.clicked) { await waitChange(P.pageSignature()); fixed = true; }
+        } catch (e) { /* 忽略 */ }
+        let i5 = null;
+        try { i5 = typeof P.pagerInfo === "function" ? P.pagerInfo() : null; } catch (e) { i5 = null; }
+        if (fixed && i5 && i5.cur === target) {
+          G.curPage = target;
+        } else {
+          G.note = "翻页跳页：目标第 " + target + " 页、实际到第 " + res.page + " 页，已停止以免漏页（方式：" + res.sel + "）";
+          break;
+        }
       }
       ovPaint(G.curPage || page, G.total, G.pages.length, G.lastClick);
       await waitStable(); // 等新一页渲染稳定，再进入下一轮提取
