@@ -1,5 +1,4 @@
 # 测试与构建产物
-_test_lib.js
 *.zip
 __pycache__/
 *.pyc
