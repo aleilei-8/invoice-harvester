@@ -171,25 +171,31 @@ function extractTables(roleKeywords, fields) {
     try { raw = (document.body && document.body.innerText) || ""; } catch (e) { return map; }
     const txt = String(raw).replace(/\s+/g, " ");
     if (!txt) return map;
+    // 所有「订单编号：xxx」出现位置 → 每单构成一个文本窗口 [本单编号结尾, 下一单编号开头)
     const ids = [];
     const idRe = /订单编号[:：]\s*([A-Za-z]*\d[\d\-]{5,})/g;
     let m;
-    while ((m = idRe.exec(txt)) !== null) ids.push({ oid: m[1], pos: m.index });
+    while ((m = idRe.exec(txt)) !== null) ids.push({ oid: m[1], start: m.index, end: m.index + m[0].length });
     if (!ids.length) return map;
-    const logiRe = /物流信息[:：]/g; // 注意：操作列按钮「物流信息」无冒号，不会误命中
-    while ((m = logiRe.exec(txt)) !== null) {
-      let cur = null;
-      for (let i = 0; i < ids.length; i++) {
-        if (ids[i].pos < m.index) cur = ids[i]; else break;
+    // 只在「本单窗口」内找物流段：比全局「最近前置编号」更稳，不受侧栏/其它区域文本干扰。
+    // 标签冒号可选（部分平台/集运仓组件渲染为「物流信息」无冒号）；操作列按钮虽同名，
+    // 但后续 parseLogisticsRow 只有在「公司词 + 紧跟运单号」同时成立时才会产出内容，故无副作用。
+    const labelRe = /物流信息\s*[:：]?/g;
+    for (let i = 0; i < ids.length; i++) {
+      const from = ids[i].end;
+      const to = i + 1 < ids.length ? ids[i + 1].start : txt.length;
+      const win = txt.slice(from, to);
+      const hits = [];
+      let mm;
+      labelRe.lastIndex = 0;
+      while ((mm = labelRe.exec(win)) !== null) hits.push(mm.index);
+      if (!hits.length) continue;
+      for (let k = 0; k < hits.length; k++) {
+        const s = hits[k];
+        const e = k + 1 < hits.length ? hits[k + 1] : win.length;
+        const seg = win.slice(s, e).trim();
+        if (seg) (map[ids[i].oid] = map[ids[i].oid] || []).push(seg);
       }
-      if (!cur) continue;
-      let end = txt.length;
-      const nl = txt.indexOf("物流信息", m.index + 5);
-      const ni = txt.indexOf("订单编号", m.index + 5);
-      if (nl !== -1) end = Math.min(end, nl);
-      if (ni !== -1) end = Math.min(end, ni);
-      const seg = txt.slice(m.index, end).trim();
-      if (seg) (map[cur.oid] = map[cur.oid] || []).push(seg);
     }
     return map;
   }
@@ -269,30 +275,32 @@ function extractTables(roleKeywords, fields) {
   }
 
   // 从物流段文本提取「快递公司 + 快递单号」（支持分段物流）
-  // 真实样例（诊断确认，注意单号与「复制」之间**无空格**）：
+  // 真实样例（诊断/截图确认，注意单号与「复制」之间**无空格**，集运仓单的公司名后可能带路由标识 HK）：
   //   物流信息：极兔速递 JT3169616537749复制 您的快件已签收…（江千红，17770199665）…
   //   物流信息：中通快递 79017338059807复制 您的快件已送达…【孙雨：15862222167】…
-  //   物流信息：邮政快递包裹 9901234567890复制 … 极兔速递HK JT0024585595081 复制 …（集运仓两段）
+  //   物流信息：集运仓🟢 消费者（二段物流） 极兔速递HK JT0024585595081复制 🟢 包裹已从…
   // 规则：
   //   ① 快递公司 = 纯中文(2~10字)结尾为 快递/速运/速递/邮政/货运/物流/包裹/快运/专递 的词
-  //      （「邮政快递包裹」是中国邮政官方名），允许带 ≤6 位拉丁字母路由后缀（「极兔速递HK」→「极兔速递」）。
-  //   ② 运单号 = 紧随该公司词之后（中间只允许空格 /「复制」等少量填充）的第一个
-  //      「字母数字混合且 ≥8 位、含数字」的串。用 submatch 而非整 token 校验，
-  //      因此「JT3169616537749复制」这类贴字也能切出 JT3169616537749。
-  //      ⚠️ 必须「紧跟」才算数：行文里大量出现「联系兔兔快递员（江千红，17770199665）」
-  //      「节假日长假（二段物流）」等含快递/物流字样的词，若不锚定，电话会被误抓成单号。
+  //      （「邮政快递包裹」是中国邮政官方名），允许带 ≤6 位拉丁路由后缀（极兔速递HK → 极兔速递）。
+  //   ② 运单号：取公司词**之后紧邻**的一段「字母数字 + 空格」（遇到中文即止，故「复制」「您的」之后
+  //      的正文与电话天然被切掉），在这段里挑**最长且含数字**的字母数字串作为运单号。
+  //      这样「极兔速递 HK JT0024585595081」（公司名与 HK 之间有空格）也能正确得到 JT0024585595081，
+  //      而首字符必须是字母数字 —— 行文「联系兔兔快递员（…）」「（二段物流）」后接中文，会被直接排除。
   function parseLogisticsRow(rec, rowText) {
-    const text = String(rowText || "").replace(/物流信息[:：]/, " ");
+    const text = String(rowText || "").replace(/物流信息\s*[:：]?/, " ");
     const courierRe = /([\u4e00-\u9fa5]{2,10}(?:快递|速运|速递|邮政|货运|物流|包裹|快运|专递))[A-Za-z]{0,6}/g;
-    const waybillAt = /^[\s\u3000]{0,6}(?:复制)?[\s\u3000]{0,6}([A-Za-z0-9]{8,40})/;
+    const zoneRe = /^[\s\u3000]*(?:复制)?[\s\u3000]*([A-Za-z0-9][A-Za-z0-9\s\u3000]{0,40})/;
     const couriers = [];
     const waybills = [];
     let m;
     while ((m = courierRe.exec(text)) !== null) {
-      const wm = text.slice(m.index + m[0].length).match(waybillAt);
-      if (wm && /\d/.test(wm[1])) {
+      const zm = text.slice(m.index + m[0].length).match(zoneRe);
+      if (!zm) continue; // 公司词后不是紧跟字母数字（如「二段物流）」「兔兔快递员（」）→ 非本公司
+      const runs = zm[1].match(/[A-Za-z0-9]{6,40}/g) || [];
+      const wb = runs.filter((r) => /\d/.test(r)).sort((a, b) => b.length - a.length)[0];
+      if (wb) {
         couriers.push(m[1]);
-        waybills.push(wm[1]);
+        waybills.push(wb);
       }
     }
     if (couriers.length) {
@@ -332,8 +340,10 @@ function extractTables(roleKeywords, fields) {
 
     (c.allCellRows || []).forEach((row) => {
       const rowText = row.join(" ");
-      // 物流行：整行是一段「物流信息：快递公司 运单号 复制 ✅轨迹…」，直接提取快递公司+单号
-      if (/物流信息[:：]/.test(rowText)) {
+      // 物流行：整行是一段「物流信息：快递公司 运单号 复制 ✅轨迹…」，直接提取快递公司+单号。
+      // 判定用「首列以物流信息开头」（冒号可选，兼容集运仓组件），避免把含「物流信息」按钮的
+      // 商品行（首列是商品名）误判为物流行而丢掉 商品信息/状态/金额。
+      if (/物流信息\s*[:：]/.test(rowText) || /^物流信息/.test(String(row[0] || ""))) {
         parseLogisticsRow(rec, rowText);
         return;
       }
@@ -1004,40 +1014,44 @@ function copyDiag() {
             ? Array.from(headerRow.querySelectorAll("th, td")).map((c) => c.innerText.trim())
             : [];
           const dataRows = allRows.filter((r) => r !== headerRow);
+          const rowsText = dataRows.slice(0, 4).map((r) =>
+            Array.from(r.querySelectorAll("th, td")).map((c) => c.innerText.replace(/\s+/g, " ").trim()).join(" ¦ ")
+          );
           const firstRow = dataRows[0]
             ? Array.from(dataRows[0].querySelectorAll("th, td")).map((c) => c.innerText.replace(/\s+/g, " ").trim())
             : [];
-          return { idx, totalRows: dataRows.length, headers, firstRow };
+          return { idx, totalRows: dataRows.length, headers, firstRow, rowsText };
         });
-        // 表外物流配对（平面文本法：与抓取逻辑一致，直接验证「订单号→物流段」配对）
+        // 物流配对（与本扩展抓取逻辑一致的「订单窗口」法：直接验证「订单号→物流段」配对）
         const logiMap = {};
         try {
           const txt = String((document.body && document.body.innerText) || "").replace(/\s+/g, " ");
           const ids = [];
           const idRe = /订单编号[:：]\s*([A-Za-z]*\d[\d\-]{5,})/g;
           let mm;
-          while ((mm = idRe.exec(txt)) !== null) ids.push({ oid: mm[1], pos: mm.index });
-          const logiRe = /物流信息[:：]/g;
-          while ((mm = logiRe.exec(txt)) !== null) {
-            let cur = null;
-            for (let i = 0; i < ids.length; i++) {
-              if (ids[i].pos < mm.index) cur = ids[i]; else break;
+          while ((mm = idRe.exec(txt)) !== null) ids.push({ oid: mm[1], start: mm.index, end: mm.index + mm[0].length });
+          const labelRe = /物流信息\s*[:：]?/g;
+          for (let i = 0; i < ids.length; i++) {
+            const from = ids[i].end;
+            const to = i + 1 < ids.length ? ids[i + 1].start : txt.length;
+            const win = txt.slice(from, to);
+            const hits = [];
+            let m2;
+            labelRe.lastIndex = 0;
+            while ((m2 = labelRe.exec(win)) !== null) hits.push(m2.index);
+            for (let k = 0; k < hits.length; k++) {
+              const s = hits[k];
+              const e = k + 1 < hits.length ? hits[k + 1] : win.length;
+              const seg = win.slice(s, e).trim();
+              if (seg) (logiMap[ids[i].oid] = logiMap[ids[i].oid] || []).push(seg);
             }
-            if (!cur) continue;
-            let end = txt.length;
-            const nl = txt.indexOf("物流信息", mm.index + 5);
-            const ni = txt.indexOf("订单编号", mm.index + 5);
-            if (nl !== -1) end = Math.min(end, nl);
-            if (ni !== -1) end = Math.min(end, ni);
-            const seg = txt.slice(mm.index, end).trim();
-            if (seg) (logiMap[cur.oid] = logiMap[cur.oid] || []).push(seg);
           }
         } catch (e) { /* 忽略 */ }
-        const outerLogi = Object.keys(logiMap).slice(0, 5).map((oid) => ({
+        const outerLogi = Object.keys(logiMap).slice(0, 80).map((oid) => ({
           oid,
-          segs: logiMap[oid].map((s) => s.slice(0, 300)),
+          segs: logiMap[oid].map((s) => s.slice(0, 400)),
         }));
-        return { url: location.href, title: document.title, tables, outerLogi };
+        return { url: location.href, title: document.title, outerLogi, tables };
       },
     }, (res) => {
       const data = res && res[0] && res[0].result;
