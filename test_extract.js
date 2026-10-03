@@ -23,12 +23,35 @@ function cell(text) { return { innerText: text }; }
 function row(cells, isTh) {
   const cs = cells.map(cell);
   return {
+    __text: cells.map((c) => String(c).replace(/\s+/g, " ").trim()).join(" "),
     querySelector(sel) { return sel === "th" && isTh ? {} : null; },
     querySelectorAll(sel) { return sel === "th, td" ? cs : []; },
   };
 }
+// 订单表：同时具备 tr 查询（表格解析）与 innerText/children（v2.5.4 DOM 锚定）
 function table(rows) {
-  return { querySelectorAll(sel) { return sel === "tr" ? rows : []; } };
+  return {
+    innerText: rows.map((r) => r.__text || "").join(" "),
+    textContent: rows.map((r) => r.__text || "").join(" "),
+    children: [],
+    parentElement: null,
+    querySelectorAll(sel) { return sel === "tr" ? rows : []; },
+  };
+}
+// 表格外的普通节点（拼多多把物流块渲染在订单 table 之外的兄弟节点）
+function block(text) {
+  return { innerText: text, textContent: text, children: [], parentElement: null };
+}
+// 容器：把子节点挂上 parentElement，并聚合 innerText（模拟真实 DOM 层级）
+function container(children) {
+  const el = {
+    children,
+    parentElement: null,
+    innerText: children.map((c) => String(c.innerText || "")).join(" "),
+    textContent: children.map((c) => String(c.textContent || "")).join(" "),
+  };
+  children.forEach((c) => { c.parentElement = el; });
+  return el;
 }
 // body.innerText 平面文本（v2.5.1：物流配对不再依赖 DOM 结构，只看文本顺序）
 function makeDoc(tables, bodyText) {
@@ -299,6 +322,64 @@ if (TV) {
   check("变体3 标签无冒号 → 中通快递 / 7900000000001", v3 && getV(v3, "快递公司") === "中通快递" && getV(v3, "快递单号") === "7900000000001");
 } else {
   check("变体组应解析出 1 张订单表", false);
+}
+
+// ================================================================
+console.log("[G] DOM 锚定：body 平面文本法失效时（集运仓组件文本不进 innerText），仍能以订单表为锚就近抓到");
+// 构造真实层级：每个订单 = 一个卡片容器（table + 表外物流块），body.innerText 置空
+const gTpl = table([row(orderTpl, true)]);
+const g1Head = ["", "订单编号：\n260708-334286067311450\n复制\n成交时间：2026-07-08 15:26"];
+const g1Row = ["透明提拉乳贴防下垂聚拢上托硅胶胸贴 ID: 655442592834 商品编码: 1688-818421643724", "已收货", "1", "9.90", "9.90", "**** 查看", "香*** 发起聊天", "查看详情 添加备注 物流信息"];
+const g1Logi = "物流信息：极兔速递 JT3169616537749复制 您的快件已签收，签收人：【小江南杂店前台代收】";
+const g2Head = ["", "订单编号：\n260706-628998869351942\n复制\n成交时间：2026-07-06 00:43"];
+const g2Row = ["透明防皱皱纹贴硅胶贴自粘软胶去皱医用硅胶贴 ID: 663969680444 商品编码: 1688-829901726375", "已收货", "1", "9.68", "9.68", "**** 查看", "E*** 发起聊天", "查看详情 添加备注 物流信息"];
+const g2LogiA = "物流信息：邮政快递包裹 9901234567890复制 包裹已到达集运仓";
+const g2LogiB = "物流信息：集运仓🟢 消费者（二段物流） 极兔速递HK JT0024585595081复制 包裹已从【XX】发出";
+const tG1 = table([row(g1Head, true), row(g1Row, false)]);
+const tG2 = table([row(g2Head, true), row(g2Row, false)]);
+const cardG1 = container([tG1, block(g1Logi)]);
+const cardG2 = container([tG2, block(g2LogiA), block(g2LogiB)]);
+container([cardG1, cardG2]); // 页面根（含多单编号，模拟列表容器）
+global.document = makeDoc([gTpl, tG1, tG2], ""); // body 文本为空 → 只有 DOM 锚定能生效
+res = extractTables(PDD_KW, FIELDS_META);
+check("G 合并为 1 张订单表", res.tables.length === 1 && res.tables[0].orderMode === true);
+if (res.tables[0]) {
+  const TG = res.tables[0];
+  const gc = (label) => TG.headers.indexOf(label);
+  const gg = (r, label) => r[gc(label)];
+  const q1 = TG.rows.find((r) => gg(r, "订单号") === "260708-334286067311450");
+  check("G 普通单（body 文本为空）仍抓到快递公司", q1 && gg(q1, "快递公司") === "极兔速递");
+  check("G 普通单仍抓到快递单号 JT3169616537749", q1 && gg(q1, "快递单号") === "JT3169616537749");
+  const q2 = TG.rows.find((r) => gg(r, "订单号") === "260706-628998869351942");
+  check("G 集运仓单（body 文本为空）仍抓到快递公司", q2 && gg(q2, "快递公司").indexOf("极兔速递") !== -1);
+  check("G 集运仓单仍抓到快递单号 JT0024585595081", q2 && gg(q2, "快递单号").indexOf("JT0024585595081") !== -1);
+}
+
+// ================================================================
+console.log("[H] 宽松兜底：英文快递公司名能抓单号；无单号时不得误抓商品 ID/商品编码");
+const hTpl = table([row(orderTpl, true)]);
+const h1Head = ["", "订单编号：\n260706-628998869351942\n复制\n成交时间：2026-07-06 00:43"];
+const h1Row = ["透明防皱皱纹贴硅胶贴自粘软胶 ID: 663969680444 商品编码: 1688-829901726375", "已收货", "1", "9.68", "9.68", "****", "E*** 发起聊天", "查看详情 添加备注 物流信息"];
+const tH1 = table([row(h1Head, true), row(h1Row, false)]);
+// 英文公司名 → 中文 courierRe 匹配不到，须靠宽松兜底
+const cardH1 = container([tH1, block("物流信息：J&T Express JT0024585595081复制 已签收")]);
+const h2Head = ["", "订单编号：\n260706-541987970573742\n复制\n下单时间：2026-07-06 01:17"];
+const tH2 = table([row(h2Head, true), row(h1Row, false)]);
+// 有物流标签但无运单号 → 绝不能把商品 ID 663969680444 / 商品编码 1688-829901726375 当成单号
+const cardH2 = container([tH2, block("物流信息：暂无物流轨迹")]);
+container([cardH1, cardH2]);
+global.document = makeDoc([hTpl, tH1, tH2], "");
+res = extractTables(PDD_KW, FIELDS_META);
+if (res.tables[0]) {
+  const TH = res.tables[0];
+  const hc = (label) => TH.headers.indexOf(label);
+  const hg = (r, label) => r[hc(label)];
+  const p1 = TH.rows.find((r) => hg(r, "订单号") === "260706-628998869351942");
+  check("H 英文公司名仍能抓到单号 JT0024585595081", p1 && hg(p1, "快递单号") === "JT0024585595081");
+  const p2 = TH.rows.find((r) => hg(r, "订单号") === "260706-541987970573742");
+  check("H 无运单号时快递单号为空", p2 && hg(p2, "快递单号") === "");
+  check("H 未误抓商品 ID 663969680444", p2 && hg(p2, "快递单号").indexOf("663969680444") === -1);
+  check("H 未误抓商品编码 1688-829901726375", p2 && hg(p2, "快递单号").indexOf("829901726375") === -1);
 }
 
 console.log("\n" + (fail === 0 ? "ALL TESTS PASSED ✅" : fail + " TEST(S) FAILED ❌"));

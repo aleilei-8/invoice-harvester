@@ -141,7 +141,7 @@ function extractTables(roleKeywords, fields) {
     }
     if (headerCells.length < 2) return;
 
-    candidates.push({ idx, headerCells, allCellRows: dataRows.map(cellTexts) });
+    candidates.push({ idx, el: tbl, headerCells, allCellRows: dataRows.map(cellTexts) });
   });
 
   // --- 订单查询页检测（拼多多：每个订单 = 独立 table，首行合并「订单编号：…成交时间：…」）---
@@ -310,6 +310,116 @@ function extractTables(roleKeywords, fields) {
     }
   }
 
+  // --- 宽松兜底解析：主流程（中文快递公司 + 紧跟运单号）没结果时启用 ---
+  // 覆盖两类真实情况：
+  //   ① 快递公司是英文/拉丁名（J&T Express、SF Express 等），courierRe 的纯中文规则匹配不到；
+  //   ② 物流块标签不是「物流信息」（集运仓组件可能渲染成「物流详情」「包裹信息」或干脆无标签）。
+  // 策略：在文本里找所有 ≥8 位且含数字的字母数字串，排除日期/电话后取「最靠前」的那个
+  //       （物流段里运单号紧跟公司名，位置必然最靠前，电话/网点号都在后面）。
+  function parseLogisticsLoose(rec, text) {
+    if (rec.tracking_no) return;
+    const t = String(text || "");
+    if (!t) return;
+    // ⚠️ 必须有物流语义标签才启用，并且只在该标签**之后**搜索：
+    //    否则商品行里的「ID: 655442592834」「商品编码: 1688-818421643724」会被误当成运单号。
+    const labelM = t.match(/物流信息\s*[:：]?|运单号\s*[:：]|快递单号\s*[:：]|快递公司\s*[:：]|承运商\s*[:：]/);
+    if (!labelM) return;
+    const scope = t.slice(labelM.index);
+    const cands = (scope.match(/[A-Za-z0-9]{8,40}/g) || []).filter((s) => {
+      if (!/\d/.test(s)) return false;                 // 必须含数字
+      if (/^\d{11}$/.test(s)) return false;            // 手机号
+      if (/^\d{4}$/.test(s)) return false;             // 年份片段
+      if (/^\d{6,}$/.test(s) && /^(19|20)\d{2}/.test(s)) return false; // 日期数字串
+      return true;
+    });
+    if (!cands.length) return;
+    // 去重后取最靠前（位置优先），同位置取最长
+    const seen = new Set();
+    const uniq = cands.filter((s) => (seen.has(s) ? false : (seen.add(s), true)));
+    const wb = uniq.sort((a, b) => scope.indexOf(a) - scope.indexOf(b) || b.length - a.length)[0];
+    if (!wb) return;
+    // 公司名兜底：取运单号前面紧邻的中文词（2~10 字）或拉丁词（如 J&T / SF / HK）
+    const before = scope.slice(0, scope.indexOf(wb));
+    const cnm = before.match(/([\u4e00-\u9fa5]{2,10})\s*$/);
+    const enm = before.match(/([A-Za-z][A-Za-z&.\-]{1,15})\s*$/);
+    rec.tracking_no = wb;
+    rec.courier = cnm ? cnm[1] : (enm ? enm[1] : "");
+    if (!rec.logistics) rec.logistics = (rec.courier ? rec.courier + " " : "") + wb;
+  }
+
+  // --- DOM 锚定：以订单 <table> 为锚点就近找物流文本（与页面具体结构无关）---
+  // 拼多多把物流块渲染在订单 table 之外，且包裹层级/组件随订单类型变化（集运仓单尤其特殊），
+  // 因此不再假设任何结构，改为两层就近搜索：
+  //   策略A 祖先冒泡：从 table 往上走，找最小的「能解析出运单号 且 只含本单一个订单编号」的容器；
+  //   策略B 兄弟扫描：物流块是 table 的后继兄弟时，从父节点的 children 向后收集文本，
+  //                   遇到下一个「订单编号」即停（不会串到别的订单）。
+  // 两层交替向上，任意一层命中即可。
+  function probeText(t) {
+    const p = {};
+    parseLogisticsRow(p, t);
+    if (!p.tracking_no) parseLogisticsLoose(p, t);
+    return p.tracking_no ? p : null;
+  }
+  function normText(el) {
+    const raw = (el && (el.innerText != null ? el.innerText : el.textContent)) || "";
+    return String(raw).replace(/\s+/g, " ").trim();
+  }
+  // innerText 只含「已渲染可见」文本；物流块若被折叠/未展开（display:none / 懒渲染）会缺失。
+  // textContent 含全部节点文本（含隐藏），作为第二路探测可救回这类订单。
+  function normTextDeep(el) {
+    const raw = (el && el.textContent) || "";
+    return String(raw).replace(/\s+/g, " ").trim();
+  }
+  function probeEl(el) {
+    const t = normText(el);
+    let hit = t ? probeText(t) : null;
+    if (!hit) {
+      const t2 = normTextDeep(el);
+      if (t2 && t2 !== t) {
+        const idCount2 = (t2.match(/订单编号/g) || []).length;
+        if (idCount2 <= 1) hit = probeText(t2);
+      }
+    }
+    return hit;
+  }
+  function scanFollowingSiblings(el) {
+    const p = el && el.parentElement;
+    if (!p || !p.children) return "";
+    const kids = Array.from(p.children);
+    const i = kids.indexOf(el);
+    if (i < 0) return "";
+    const parts = [];
+    for (let k = i + 1; k < kids.length; k++) {
+      const t = normText(kids[k]);
+      if (!t) continue;
+      if (/订单编号/.test(t)) break; // 下一个订单开始 → 不再向后取
+      parts.push(t);
+    }
+    return parts.join(" ").trim();
+  }
+  function collectLogiByDom(tblEl) {
+    if (!tblEl) return "";
+    let node = tblEl;
+    for (let d = 0; node && d < 14; d++) {
+      // 策略A：祖先容器（必须只含本单编号，避免跨到别的订单）
+      const t = normText(node);
+      if (t && t.length >= 20 && t.length < 8000) {
+        const idCount = (t.match(/订单编号/g) || []).length;
+        if (idCount > 1) break; // 已越过订单卡片边界
+        const hit = probeEl(node);
+        if (hit) return normTextDeep(node) || t;
+      }
+      // 策略B：后继兄弟（物流块是 table 的兄弟节点）
+      const sib = scanFollowingSiblings(node);
+      if (sib) {
+        const hit = probeText(sib);
+        if (hit) return sib;
+      }
+      node = node.parentElement;
+    }
+    return "";
+  }
+
   // 把一张订单表解析成标准记录（logiById：订单号 -> [物流段文本]（表外平面文本配对结果））
   function parseOrderTable(c, template, logiById) {
     const headText = (c.headerCells || []).join("\n");
@@ -368,15 +478,26 @@ function extractTables(roleKeywords, fields) {
       const o = v(idx.op); if (o) rec._op = o;
     });
 
-    // 表外物流段（按订单号精确配对；集运仓分段可能有多个段）
+    // 表外物流：三路取并集，先到先得（已有值则不再覆盖）
+    //   ① DOM 锚定（首选）：以本订单 table 为锚点就近搜索，与页面结构/标签文案无关；
+    //   ② 平面文本窗口配对（兜底）：body.innerText 按「订单编号窗口」切段；
+    //   ③ 每路解析后都跑一次宽松兜底（公司名为英文、标签非「物流信息」时仍能抓到单号）。
+    const domText = collectLogiByDom(c.el);
+    if (domText && !rec.tracking_no) {
+      parseLogisticsRow(rec, domText);
+      parseLogisticsLoose(rec, domText);
+    }
     const outerSegs = logiById && logiById[oid];
-    if (outerSegs && outerSegs.length) {
-      parseLogisticsRow(rec, outerSegs.join("\n"));
+    if (outerSegs && outerSegs.length && !rec.tracking_no) {
+      const joined = outerSegs.join("\n");
+      parseLogisticsRow(rec, joined);
+      parseLogisticsLoose(rec, joined);
     }
 
     const op = rec._op || "";
-    // 操作列里有「物流信息」按钮但没解析到物流行 → 说明未发货或需要点进详情，仅作标记
+    // 操作列里有「物流信息」按钮但没解析到物流行 → 明确标记，避免导出里出现无法解释的空白
     if (!rec.logistics && /物流信息/.test(op)) rec.logistics = "可查(点物流信息)";
+    if (!rec.tracking_no && /物流信息/.test(op) && !rec.courier) rec.courier = "可查(点物流信息)";
     const ub = op.match(/用户备注[:：]\s*(\S+)/);
     const bl = op.match(/买家留言[:：]\s*(\S+)/);
     const parts = [];
@@ -1051,7 +1172,43 @@ function copyDiag() {
           oid,
           segs: logiMap[oid].map((s) => s.slice(0, 400)),
         }));
-        return { url: location.href, title: document.title, outerLogi, tables };
+        // DOM 锚定探针（与抓取逻辑同源）：逐张订单表输出就近抓到的容器文本，
+        // domText 为空 = 该订单周围压根没有物流文本（可据此判断是结构问题还是未渲染）
+        const normEl = (el) => String((el && (el.innerText != null ? el.innerText : el.textContent)) || "").replace(/\s+/g, " ").trim();
+        const logiProbe = [];
+        Array.from(document.querySelectorAll("table")).forEach((tbl, idx) => {
+          const h = normEl(tbl);
+          const om = h.match(/订单编号[:：]\s*([A-Za-z]*\d[\d\-]{5,})/);
+          if (!om) return;
+          let node = tbl, found = "";
+          for (let d = 0; node && d < 14 && !found; d++) {
+            const t = normEl(node);
+            if (t && t.length >= 20 && t.length < 8000) {
+              const idCount = (t.match(/订单编号/g) || []).length;
+              if (idCount <= 1) {
+                if (/物流信息|快递|速递|速运|运单|包裹/.test(t)) found = t;
+              } else { break; }
+            }
+            if (!found && node.parentElement && node.parentElement.children) {
+              const kids = Array.from(node.parentElement.children);
+              const i = kids.indexOf(node);
+              if (i >= 0) {
+                const parts = [];
+                for (let k = i + 1; k < kids.length; k++) {
+                  const tt = normEl(kids[k]);
+                  if (!tt) continue;
+                  if (/订单编号/.test(tt)) break;
+                  parts.push(tt);
+                }
+                const s = parts.join(" ").trim();
+                if (s && /物流信息|快递|速递|速运|运单|包裹/.test(s)) found = s;
+              }
+            }
+            node = node.parentElement;
+          }
+          logiProbe.push({ idx, oid: om[1], domLen: found.length, domText: found.slice(0, 400) });
+        });
+        return { url: location.href, title: document.title, outerLogi, logiProbe, tables };
       },
     }, (res) => {
       const data = res && res[0] && res[0].result;
