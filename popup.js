@@ -13,7 +13,7 @@ const PLATFORM_PRESETS = {
       tracking_no: ["快递单号", "物流单号", "运单号", "货运单号", "tracking", "waybill", "物流"],
       amount: ["金额", "价税合计", "开票金额", "实付金额", "合计", "金额(元)", "amount", "price", "价税"],
       items: ["物品", "商品", "发票内容", "货物", "货品", "商品名称", "item", "product", "内容", "品名"],
-      invoice_date: ["开票时间", "开票日期", "开票"],
+      invoice_date: ["开票时间", "开票日期", "开票日期时间"],
       apply_date: ["申请时间", "申请日期", "apply"],
       buyer: ["买家", "收货人", "购买方", "customer", "consignee", "收件人"],
     },
@@ -105,6 +105,12 @@ function extractTables(roleKeywords, fields) {
     }
     if (headerCells.length < 2) return;
 
+    const rows = dataRows
+      .map((r) => Array.from(r.querySelectorAll("th, td")).map((c) => c.innerText.replace(/\s+/g, " ").trim()))
+      .filter((r) => r.length >= headerCells.length);
+
+    if (!rows.length) return;
+
     const roleMap = {};
     const autoRoles = [];
     headerCells.forEach((hc, ci) => {
@@ -113,11 +119,50 @@ function extractTables(roleKeywords, fields) {
       if (role) autoRoles.push(ci);
     });
 
-    const rows = dataRows
-      .map((r) => Array.from(r.querySelectorAll("th, td")).map((c) => c.innerText.replace(/\s+/g, " ").trim()))
-      .filter((r) => r.length >= headerCells.length);
+    // --- 内容嗅探二次校验（表头常与内容不符，如「开票状态」列里是订单号）---
+    // 对一列取值统计特征：orderLike / amountLike / dateLike 的占比
+    function sniff(vals) {
+      const vs = vals.filter((v) => v != null && String(v).trim() !== "");
+      if (vs.length < 2) return null;
+      let order = 0, amount = 0, date = 0;
+      vs.forEach((v) => {
+        const s = String(v).trim();
+        const isDate = /\d{4}[-/年]\d{1,2}[-/月]\d{1,2}/.test(s);
+        if (isDate) { date++; return; } // 日期不算订单号
+        if (/^\d[\d\-]{7,}(\s|$)/.test(s) || /^\d{8,}$/.test(s.split(/\s+/)[0])) order++;
+        if (/[¥￥]/.test(s) || /^\d{1,3}(,\d{3})*(\.\d+)?$/.test(s)) amount++;
+      });
+      const n = vs.length;
+      if (date / n >= 0.6) return "invoice_date";
+      if (order / n >= 0.6) return "order_id";
+      if (amount / n >= 0.6) return "amount";
+      return null;
+    }
 
-    if (!rows.length) return;
+    // 1) 已被表头映射为 invoice_date、但内容明显是订单号、且没有订单号列 → 纠正为 order_id
+    const hasOrderCol = Object.values(roleMap).indexOf("order_id") !== -1;
+    if (!hasOrderCol) {
+      headerCells.forEach((hc, ci) => {
+        if (roleMap[ci] !== "invoice_date") return;
+        const s = sniff(rows.slice(0, 30).map((r) => r[ci]));
+        if (s === "order_id") {
+          roleMap[ci] = "order_id";
+        }
+      });
+    }
+    // 2) 表头没匹配上的列，按内容补角色（只补订单号/金额/日期三类高置信度特征）
+    headerCells.forEach((hc, ci) => {
+      if (roleMap[ci]) return;
+      const s = sniff(rows.slice(0, 30).map((r) => r[ci]));
+      if (s) {
+        // 该角色已被占用则不抢
+        if (Object.values(roleMap).indexOf(s) === -1) {
+          roleMap[ci] = s;
+          autoRoles.push(ci);
+        }
+      }
+    });
+
     out.push({ idx, headers: headerCells, roleMap, autoRoles, rows, rowCount: rows.length });
   });
   return { tables: out };
@@ -381,6 +426,7 @@ function append() {
         rec.captured_at = now;
         rec.platform = plat;
         rec.source = sourceLabel;
+        rec.order_id = IH_LIB.cleanOrderId(rec.order_id); // 剥离「订单号 逾期未开票」类混合文本
         const oid = (rec.order_id || "").trim();
         if (oid && lib.some((x) => (x.order_id || "").trim() === oid)) {
           const exist = lib.find((x) => (x.order_id || "").trim() === oid);
@@ -476,6 +522,53 @@ function clearLib() {
   });
 }
 
+// ===== 诊断：复制本页所有表格的原始表头与首行（适配新平台用）=====
+function copyDiag() {
+  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+    const tab = tabs && tabs[0];
+    if (!tab || !tab.url || !(tab.url.indexOf("http") === 0)) {
+      log("请先打开商家后台页面再诊断", "warn");
+      return;
+    }
+    chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: () => {
+        const tables = Array.from(document.querySelectorAll("table")).map((tbl, idx) => {
+          const allRows = Array.from(tbl.querySelectorAll("tr"));
+          const headerRow = allRows.find((r) => r.querySelector("th")) || allRows[0];
+          const headers = headerRow
+            ? Array.from(headerRow.querySelectorAll("th, td")).map((c) => c.innerText.trim())
+            : [];
+          const dataRows = allRows.filter((r) => r !== headerRow);
+          const firstRow = dataRows[0]
+            ? Array.from(dataRows[0].querySelectorAll("th, td")).map((c) => c.innerText.replace(/\s+/g, " ").trim())
+            : [];
+          return { idx, totalRows: dataRows.length, headers, firstRow };
+        });
+        return { url: location.href, title: document.title, tables };
+      },
+    }, (res) => {
+      const data = res && res[0] && res[0].result;
+      if (!data) {
+        log("诊断失败：页面注入异常", "err");
+        return;
+      }
+      const text = JSON.stringify(data, null, 2);
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(
+          () => {
+            $("status").textContent = "诊断信息已复制到剪贴板";
+            log("诊断信息已复制（含本页所有表格的原始表头+首行），粘贴发给开发者即可精确适配", "ok");
+          },
+          () => prompt("剪贴板不可用，请手动复制：", text)
+        );
+      } else {
+        prompt("请手动复制诊断信息：", text);
+      }
+    });
+  });
+}
+
 // ===== 初始化 =====
 document.addEventListener("DOMContentLoaded", () => {
   loadPlatformSelector();
@@ -483,6 +576,7 @@ document.addEventListener("DOMContentLoaded", () => {
   $("btn-append").addEventListener("click", append);
   $("btn-export-csv").addEventListener("click", exportCsv);
   $("btn-export-xlsx").addEventListener("click", exportXlsx);
+  $("btn-diag").addEventListener("click", copyDiag);
   $("btn-clear").addEventListener("click", clearLib);
   refreshLibCount();
   log("就绪。选择平台 → 打开对应商家后台发票/订单页 → 点「抓取本页」");

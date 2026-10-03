@@ -54,7 +54,7 @@ let wb;
 try { wb = LIB.sheetsToWorkbook(sheets, XLSX); }
 catch (e) { check("sheetsToWorkbook 不抛错", false); console.log("    " + e.message); }
 const fs = require("fs");
-const out = "C:/Users/JoShua/WorkBuddy/2026-09-10-00-31-02/pdd-invoice-grabber/_test_out.xlsx";
+const out = "C:/Users/JoShua/WorkBuddy/2026-09-10-00-31-02/pdd-invoice-grabber/test_out.tmp.xlsx";
 // 说明：本机 Node 环境下 SheetJS 的 XLSX.writeFile（fs 写入）受限，改用 XLSX.write 生成 buffer，
 // 再用 Node fs 落盘并回读——与浏览器内 XLSX.writeFile（触发下载）共用同一套 workbook 构建逻辑。
 const buf = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
@@ -71,6 +71,20 @@ check("回读明细行数一致", detail.length === recs.length + 1);
 const sum = XLSX.utils.sheet_to_json(wb2.Sheets["按抬头汇总"], { header: 1 });
 check("回读汇总行数一致", sum.length === 5);
 check("回读汇总合计金额正确", Math.abs(sum[4][3] - (1234.5 + 200 + 88.8 + 50)) < 1e-6);
+
+console.log("[5] cleanOrderId（混合文本提取纯单号）");
+check("「单号 状态」混合文本", LIB.cleanOrderId("2603007-49339701071913 逾期未开票") === "2603007-49339701071913");
+check("纯数字单号", LIB.cleanOrderId("20260913-1234567890") === "20260913-1234567890");
+check("带前缀文本", LIB.cleanOrderId("订单号：PDD20260913001") === "PDD20260913001");
+check("普通文本原样保留", LIB.cleanOrderId("无单号") === "无单号");
+check("空值 -> 空串", LIB.cleanOrderId("") === "" && LIB.cleanOrderId(null) === "");
+
+console.log("[6] sniffRole（内容特征嗅探）");
+check("订单号列 -> order_id", LIB.sniffRole(["2603007-49339701071913 逾期未开票", "2603033-685496102431352 逾期未开票", "2603011-083571545700889"]) === "order_id");
+check("金额列 -> amount", LIB.sniffRole(["¥1,234.50", "200.00", "88.8"]) === "amount");
+check("日期列 -> invoice_date", LIB.sniffRole(["2026-09-13 10:00:00", "2026-09-12 09:30:00", "2026年9月10日"]) === "invoice_date");
+check("普通文本 -> null", LIB.sniffRole(["已发货", "待付款", "已完成"]) === null);
+check("空列 -> null", LIB.sniffRole([]) === null);
 
 console.log("\n" + (fail === 0 ? "ALL TESTS PASSED ✅" : (fail + " TEST(S) FAILED ❌")));
 try { if (fs.existsSync(out)) fs.unlinkSync(out); } catch (e) {}

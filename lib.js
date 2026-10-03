@@ -32,6 +32,37 @@
     return isNaN(n) ? 0 : n;
   }
 
+  // ===== 订单号清洗 =====
+  // 从混合文本（如「2603007-49339701071913 逾期未开票」）中提取纯订单号：
+  // 取第一段「数字开头、长度≥8、可含连字符」的 token。
+  function cleanOrderId(v) {
+    if (v == null) return "";
+    const s = String(v).trim();
+    if (!s) return "";
+    const m = s.match(/[A-Za-z]*\d[\d\-]{7,}/);
+    return m ? m[0] : s.split(/\s+/)[0];
+  }
+
+  // ===== 内容嗅探（表头匹配不上/匹配错时的二次校验）=====
+  // 对一列的取值做统计，返回该列内容"最像"的角色或 null。
+  function sniffRole(values) {
+    const vals = (values || []).filter((v) => v != null && String(v).trim() !== "");
+    if (vals.length < 2) return null;
+    let order = 0, amount = 0, date = 0;
+    vals.forEach((v) => {
+      const s = String(v).trim();
+      const isDate = /\d{4}[-/年]\d{1,2}[-/月]\d{1,2}/.test(s);
+      if (isDate) { date++; return; } // 日期不算订单号
+      if (/^\d[\d\-]{7,}(\s|$)/.test(s) || /^\d{8,}$/.test(s.replace(/\s.*/, ""))) order++;
+      if (/[¥￥]/.test(s) || /^\d{1,3}(,\d{3})*(\.\d+)?$/.test(s)) amount++;
+    });
+    const n = vals.length;
+    if (date / n >= 0.6) return "invoice_date";
+    if (order / n >= 0.6) return "order_id";
+    if (amount / n >= 0.6) return "amount";
+    return null;
+  }
+
   // 按发票抬头分组（同一公司多笔合并），返回按合计金额降序的分组数组
   function groupByTitle(records) {
     const map = new Map();
@@ -105,5 +136,5 @@
     return wb;
   }
 
-  return { FIELDS, parseAmount, groupByTitle, detailRows, summaryRows, buildSheets, sheetsToWorkbook };
+  return { FIELDS, parseAmount, cleanOrderId, sniffRole, groupByTitle, detailRows, summaryRows, buildSheets, sheetsToWorkbook };
 });
