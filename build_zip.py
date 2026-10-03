@@ -4,7 +4,7 @@
 把浏览器扩展打包成可分发的 zip（供其他卖家下载后「加载已解压的扩展程序」）。
 
 用法：
-    python build_zip.py                 # 默认输出 invoice-harvester-chrome.zip
+    python build_zip.py                 # 默认输出 ecom-order-helper-chrome.zip
     python build_zip.py -o 我的插件.zip  # 指定输出名
 
 只打包扩展运行必需文件，排除 .git / 缓存 / 临时文件 / Python 与文档等非前端资源。
@@ -60,10 +60,10 @@ def build(ext_dir: str, out_name: str):
 
 
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser(description="打包电商开票信息抓取器扩展")
+    ap = argparse.ArgumentParser(description="打包电商订单信息助手扩展")
     ap.add_argument("-d", "--dir", default=os.path.dirname(os.path.abspath(__file__)),
                     help="扩展目录（默认当前脚本所在目录）")
-    ap.add_argument("-o", "--output", default="invoice-harvester-chrome.zip",
+    ap.add_argument("-o", "--output", default="ecom-order-helper-chrome.zip",
                     help="输出 zip 文件名")
     args = ap.parse_args()
     build(args.dir, args.output)

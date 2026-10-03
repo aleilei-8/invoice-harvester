@@ -19,6 +19,7 @@ const extractTables = new Function(
 )();
 
 // ---- 最小假 DOM ----
+// docIndex：文档顺序（用于 compareDocumentPosition 模拟）
 function cell(text) { return { innerText: text }; }
 function row(cells, isTh) {
   const cs = cells.map(cell);
@@ -27,11 +28,33 @@ function row(cells, isTh) {
     querySelectorAll(sel) { return sel === "th, td" ? cs : []; },
   };
 }
-function table(rows) {
-  return { querySelectorAll(sel) { return sel === "tr" ? rows : []; } };
+function table(rows, docIndex) {
+  return {
+    docIndex: docIndex == null ? -1 : docIndex,
+    querySelectorAll(sel) { return sel === "tr" ? rows : []; },
+    compareDocumentPosition(other) { return other.docIndex > this.docIndex ? 4 : 0; },
+  };
 }
-function makeDoc(tables) {
-  return { querySelectorAll(sel) { return sel === "table" ? tables : []; } };
+// 表格外节点（拼多多订单页：物流信息块渲染在订单 <table> 之外的兄弟 div 里）
+function logiDiv(text, docIndex) {
+  return {
+    innerText: text,
+    textContent: text,
+    docIndex,
+    closest() { return null; },
+    querySelector() { return null; },
+    contains() { return false; },
+    compareDocumentPosition(other) { return other.docIndex > this.docIndex ? 4 : 0; },
+  };
+}
+function makeDoc(tables, divs) {
+  return {
+    querySelectorAll(sel) {
+      if (sel === "table") return tables;
+      if (sel === "div, span, p, li, section" || sel === "div, span, p, li") return divs || [];
+      return [];
+    },
+  };
 }
 
 // 拼多多关键词预设（与 popup.js 保持一致）
@@ -157,31 +180,37 @@ if (res.tables[0]) {
 }
 
 // ================================================================
-console.log("[E] 拼多多订单查询页（真实结构+截图物流行）：每订单独立 table = 订单编号行 + 商品行 + 物流行");
-// 表 0：纯表头模板表（含 商品信息/订单·售后状态…，0 数据行）
+console.log("[E] 拼多多订单查询页（真实 DOM）：每订单 = 独立 table（订单编号行+商品行），物流块在 table 之外的兄弟节点");
+// 诊断确认：订单表 totalRows=2（不含物流行），物流信息块是表外元素
 const orderTpl = ["", "商品信息", "订单/售后状态", "数量", "商品总价(元)", "实收金额(元)", "收货信息", "买家", "操作/备注"];
-const t0o = table([row(orderTpl, true)]);
-// 订单 1（已收货，物流行 = 极兔速递 JT3169616537749，行文含电话 17770199665，截图 2 真实文本）
+const t0o = table([row(orderTpl, true)], 0);
+// 订单 1（已收货，物流块 = 极兔速递 JT3169616537749，行文含电话 17770199665）
 const o1Head = ["", "订单编号：\n260708-334286067311450\n复制\n成交时间：2026-07-08 15:26"];
 const o1Row = ["透明提拉乳贴防下垂聚拢上托硅胶胸贴防走光贴婚纱隐形乳头贴 ID: 655442592834 商品编码: 1688-818421643724 1对裸装,透明提拉圆8cm", "已收货", "1", "9.90", "9.90", "**** 查看 **** **** **** ****", "香*** 发起聊天", "查看详情 添加备注 物流信息"];
-const o1Logi = ["物流信息：极兔速递 JT3169616537749 复制 ✅ 您的快件已签收，签收人：【小江浔浔杂货店前台代收】。如遇物流问题无需找我家/平台，请联系紧急快递员（江千红，17770199665），投诉… 2026-07-09 11:43:28"];
-// 订单 2（已收货，物流行 = 中通快递 7901738059807，行文含电话，验证不误抓）
+const o1Logi = "物流信息：极兔速递 JT3169616537749 复制 ✅ 您的快件已签收，签收人：【小江浔浔杂货店前台代收】。如遇物流问题无需找我家/平台，请联系紧急快递员（江千红，17770199665），投诉… 2026-07-09 11:43:28";
+// 订单 2（已收货，物流块 = 中通快递 7901738059807，行文含电话，验证不误抓）
 const o2Head = ["", "订单编号：\n260708-431185017272152\n复制\n成交时间：2026-07-08 05:50"];
 const o2Row = ["宝娜斯胸贴防走光夏季薄款防水防汗轻薄学生无痕游泳上托自粘运动 ID: 655801575336 商品编码: 1688-647592645256 袋装一对（圆形）,（均码）", "已收货", "3", "15.72", "14.94", "**** 查看 **** **** **** ****", "**** 发起聊天", "查看详情 修改备注 物流信息"];
-const o2Logi = ["物流信息：中通快递 7901738059807 复制 ✅ 您的快件已送达，如有问题请联系快递员【芳哥：15062222167】，无需找我/家/平台，签收人：家人，网点电话：0510-66123255"];
-// 订单 3（已取消，无物流行）
+const o2Logi = "物流信息：中通快递 7901738059807 复制 ✅ 您的快件已送达，如有问题请联系快递员【芳哥：15062222167】，无需找我/家/平台，签收人：家人，网点电话：0510-66123255";
+// 订单 3（已取消，无物流块）
 const o3Head = ["", "订单编号：\n260706-493124329023938\n复制\n下单时间：2026-07-06 23:37"];
 const o3Row = ["时尚卷内衣防走光贴双面隐形贴衣领固定贴双面胶 clothing tape ID: 659606645941 商品编码: 1688-670977647116 16mm*5M胶带壳带卡+3个卷,均码", "已取消", "1", "12.50", "10.63", "**** 查看 **** **** **** ****", "9*** 发起聊天", "查看详情 添加备注"];
-// 订单 4（已收货，集运仓分段物流：快递公司后带 HK 路由标识，行内有「二段物流」字样，截图 1 真实文本）
+// 订单 4（已收货，集运仓分段物流：两个物流块对应同一订单，快递公司后带 HK 路由标识）
 const o4Head = ["", "订单编号：\n260706-628998869351942\n复制\n成交时间：2026-07-06 00:43"];
 const o4Row = ["透明防皱皱纹贴硅胶贴自粘软胶去皱医用硅胶贴硅胶贴面部美容 ID: 663969680444 商品编码: 1688-829901726375 脸部5件套,均码", "已收货", "1", "9.68", "9.68", "**** 查看 **** **** **** ****", "E*** 发起聊天", "查看详情 添加备注 物流信息"];
-const o4Logi = ["物流信息：集运仓🟢 消夷香（二段物流） 极兔速递HK JT0024585595081 复制 🟢 包裹已从【采取自愿提取】出 2026-07-10 19:06:30"];
-// 真实 DOM：每个订单是独立的 <table>（数据行数 = 商品行 + 物流行）
-const t6 = table([row(o1Head, true), row(o1Row, false), row(o1Logi, false)]);
-const t7 = table([row(o2Head, true), row(o2Row, false), row(o2Logi, false)]);
-const t8 = table([row(o3Head, true), row(o3Row, false)]);
-const t9 = table([row(o4Head, true), row(o4Row, false), row(o4Logi, false)]);
-global.document = makeDoc([t0o, t6, t7, t8, t9]);
+const o4LogiA = "物流信息：邮政快递包裹 9901234567890 复制 🟢 包裹已到达集运仓 2026-07-08 10:00:00";
+const o4LogiB = "物流信息：集运仓🟢 消夷香（二段物流） 极兔速递HK JT0024585595081 复制 🟢 包裹已从【采取自愿提取】出 2026-07-10 19:06:30";
+// 真实 DOM：每订单 = table（2 行）+ 兄弟物流 div（无物流的单没有 div）
+const t6 = table([row(o1Head, true), row(o1Row, false)], 1);
+const t7 = table([row(o2Head, true), row(o2Row, false)], 3);
+const t8 = table([row(o3Head, true), row(o3Row, false)], 5);
+const t9 = table([row(o4Head, true), row(o4Row, false)], 7);
+const divs = [
+  logiDiv(o1Logi, 2),                                        // → 归属订单 1
+  logiDiv(o2Logi, 4),                                        // → 归属订单 2
+  logiDiv(o4LogiA, 8), logiDiv(o4LogiB, 9),                  // → 都归属订单 4（分段物流）
+];
+global.document = makeDoc([t0o, t6, t7, t8, t9], divs);
 res = extractTables(PDD_KW, FIELDS_META);
 check("订单查询页合并为 1 张表（orderMode）", res.tables.length === 1 && res.tables[0].orderMode === true);
 if (res.tables[0]) {
@@ -193,12 +222,12 @@ if (res.tables[0]) {
     T6.headers.indexOf("买家") === -1 && T6.headers.indexOf("金额") === -1 && T6.headers.indexOf("物流信息") === -1);
   const col = (label) => T6.headers.indexOf(label);
   const get = (r, label) => r[col(label)];
-  // 订单 1
+  // 订单 1（表外物流块归属正确）
   const r0 = T6.rows.find((r) => get(r, "订单号") === "260708-334286067311450");
   check("订单1 存在且订单号正确", !!r0);
   check("订单1 订单状态=已收货", r0 && get(r0, "订单状态") === "已收货");
   check("订单1 物品取自商品信息", r0 && get(r0, "物品").indexOf("透明提拉乳贴") !== -1);
-  check("订单1 快递公司=极兔速递", r0 && get(r0, "快递公司") === "极兔速递");
+  check("订单1 快递公司=极兔速递（表外物流块）", r0 && get(r0, "快递公司") === "极兔速递");
   check("订单1 快递单号=JT3169616537749（不误抓电话 17770199665）", r0 && get(r0, "快递单号") === "JT3169616537749");
   // 订单 2
   const r1 = T6.rows.find((r) => get(r, "订单号") === "260708-431185017272152");
@@ -207,17 +236,18 @@ if (res.tables[0]) {
   check("订单2 快递公司=中通快递", r1 && get(r1, "快递公司") === "中通快递");
   check("订单2 快递单号=7901738059807（不误抓电话 15062222167）", r1 && get(r1, "快递单号") === "7901738059807");
   check("订单2 物品取自商品信息", r1 && get(r1, "物品").indexOf("宝娜斯胸贴") !== -1);
-  // 订单 3（已取消、无物流行）
+  // 订单 3（已取消、无物流块）
   const r2 = T6.rows.find((r) => get(r, "订单号") === "260706-493124329023938");
   check("订单3 存在", !!r2);
   check("订单3 订单状态=已取消", r2 && get(r2, "订单状态") === "已取消");
-  check("订单3 无物流行 → 快递公司/单号为空", r2 && get(r2, "快递公司") === "" && get(r2, "快递单号") === "");
-  // 订单 4（集运仓分段物流）
+  check("订单3 无物流块 → 快递公司/单号为空", r2 && get(r2, "快递公司") === "" && get(r2, "快递单号") === "");
+  // 订单 4（集运仓分段物流：两个物流块都归属该订单）
   const r3 = T6.rows.find((r) => get(r, "订单号") === "260706-628998869351942");
   check("订单4（集运仓）存在", !!r3);
   check("订单4 订单状态=已收货", r3 && get(r3, "订单状态") === "已收货");
-  check("订单4 快递公司=极兔速递（HK 路由标识已剥离）", r3 && get(r3, "快递公司") === "极兔速递");
-  check("订单4 快递单号=JT0024585595081（「二段物流」字样不干扰）", r3 && get(r3, "快递单号") === "JT0024585595081");
+  check("订单4 快递公司含两段（邮政快递包裹、极兔速递）", r3 && get(r3, "快递公司").indexOf("邮政快递包裹") !== -1 && get(r3, "快递公司").indexOf("极兔速递") !== -1);
+  check("订单4 快递单号含两段（9901234567890、JT0024585595081）", r3 && get(r3, "快递单号").indexOf("9901234567890") !== -1 && get(r3, "快递单号").indexOf("JT0024585595081") !== -1);
+  check("订单4 HK 路由标识已剥离", r3 && get(r3, "快递公司").indexOf("HK") === -1);
   check("订单4 物品取自商品信息", r3 && get(r3, "物品").indexOf("透明防皱皱纹贴") !== -1);
 }
 

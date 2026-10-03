@@ -157,6 +157,46 @@ function extractTables(roleKeywords, fields) {
   const orderIdx = new Set(candidates.filter(isOrderTable).map((c) => c.idx));
   const orderListMode = orderIdx.size > 0 && (orderTplCand != null || orderIdx.size >= 2);
 
+  // --- 表格外物流信息块采集 ---
+  // 真实 DOM（用户诊断确认）：拼多多订单页的物流行渲染在订单 <table> 之外的兄弟节点里，
+  // 订单表本身只有「订单编号行 + 商品行」两行（totalRows=2），表内扫描永远看不到物流。
+  // 此处全局扫描含「物流信息：」的表外元素，并按 DOM 顺序归属到它前面最近的订单表。
+  function collectOuterLogiBlocks() {
+    let els = [];
+    try { els = Array.from(document.querySelectorAll("div, span, p, li, section")); } catch (e) { return []; }
+    const matched = [];
+    els.forEach((el) => {
+      if (!el || !el.textContent) return;
+      if (el.closest && el.closest("table")) return;             // 表内物流行走原有解析路径
+      if (el.querySelector && el.querySelector("table")) return; // 含订单表的大容器跳过
+      const t = String(el.textContent).replace(/\s+/g, " ").trim();
+      if (!t || t.length > 800) return;                          // 页面级大容器跳过
+      if (/物流信息[:：]/.test(t)) matched.push(el);
+    });
+    // 去嵌套：父子都命中时只保留最外层（文本完整，避免重复归属）
+    return matched.filter((el) => !matched.some((o) => o !== el && o.contains && o.contains(el)));
+  }
+
+  const logiByTableIdx = {};
+  if (orderIdx.size) {
+    const logiBlocks = collectOuterLogiBlocks();
+    // DOCUMENT_POSITION_FOLLOWING=4：b 在 a 之后
+    const following = (a, b) => !!(a && a.compareDocumentPosition && (a.compareDocumentPosition(b) & 4));
+    const orderEls = candidates
+      .filter((c) => orderIdx.has(c.idx) && tables[c.idx])
+      .map((c) => ({ key: c.idx, el: tables[c.idx] })); // candidates 按文档顺序构建
+    let cur = -1;
+    logiBlocks.forEach((el) => {
+      while (cur + 1 < orderEls.length && following(orderEls[cur + 1].el, el)) cur++;
+      if (cur >= 0 && following(orderEls[cur].el, el)) {
+        const key = orderEls[cur].key;
+        (logiByTableIdx[key] = logiByTableIdx[key] || []).push(
+          String(el.textContent).replace(/\s+/g, " ").trim()
+        );
+      }
+    });
+  }
+
   // --- 第二遍：合并「粘性表头」---
   // 拼多多等后台会把真实表头单独渲染成一张无数据的表（idx 靠前），
   // 数据表则没有 th，首行数据被误当表头。此处把两者拼回：
@@ -235,8 +275,9 @@ function extractTables(roleKeywords, fields) {
   //   物流信息：中通快递 7901738059807 复制 ✅…【芳哥：15062222167】…
   //   物流信息：集运仓🟢 消夷香（二段物流） 极兔速递HK JT0024585595081 复制 🟢包裹已从…出 2026-07-10 19:06:30
   // 规则：
-  //   ① 按空白分词；快递公司 = 纯中文(2~10字)结尾为 快递/速运/速递/邮政/货运/物流 的词，
-  //      允许带 ≤6 位拉丁字母路由后缀（如「极兔速递HK」→ 展示「极兔速递」）；
+  //   ① 按空白分词；快递公司 = 纯中文(2~10字)结尾为 快递/速运/速递/邮政/货运/物流/包裹 的词
+  //      （「邮政快递包裹」是中国邮政官方名称），允许带 ≤6 位拉丁字母路由后缀
+  //      （如「极兔速递HK」→ 展示「极兔速递」）；
   //      「集运仓🟢」「消夷香（二段物流）」含 emoji/括号，不会误判为快递公司。
   //   ② 运单号 = 快递公司词后第一个「字母数字混合且 ≥8 位」的词（必须含数字），
   //      行内电话（11位纯数字但位置靠后）不会被误抓；时间戳（含 -/:）天然不匹配。
@@ -244,7 +285,7 @@ function extractTables(roleKeywords, fields) {
   function parseLogisticsRow(rec, rowText) {
     const text = String(rowText || "").replace(/物流信息[:：]/, " ");
     const tokens = text.split(/\s+/).filter(Boolean);
-    const courierRe = /^([\u4e00-\u9fa5]{2,10}(?:快递|速运|速递|邮政|货运|物流))[A-Za-z]{0,6}$/;
+    const courierRe = /^([\u4e00-\u9fa5]{2,10}(?:快递|速运|速递|邮政|货运|物流|包裹))[A-Za-z]{0,6}$/;
     const waybillRe = /^[A-Za-z0-9]{8,30}$/;
     const couriers = [];
     const waybills = [];
@@ -267,8 +308,8 @@ function extractTables(roleKeywords, fields) {
     }
   }
 
-  // 把一张订单表解析成标准记录
-  function parseOrderTable(c, template) {
+  // 把一张订单表解析成标准记录（outerLogiTexts：归属到这张表的表外物流块文本）
+  function parseOrderTable(c, template, outerLogiTexts) {
     const headText = (c.headerCells || []).join("\n");
     const oidM = headText.match(/订单编号[:：]\s*([A-Za-z]*\d[\d\-]{5,})/);
     const oid = oidM ? oidM[1] : "";
@@ -323,6 +364,11 @@ function extractTables(roleKeywords, fields) {
       const o = v(idx.op); if (o) rec._op = o;
     });
 
+    // 表外物流块（拼多多真实结构：物流行在 <table> 之外的兄弟节点；集运仓分段可能有多个块）
+    if (outerLogiTexts && outerLogiTexts.length) {
+      parseLogisticsRow(rec, outerLogiTexts.join("\n"));
+    }
+
     const op = rec._op || "";
     // 操作列里有「物流信息」按钮但没解析到物流行 → 说明未发货或需要点进详情，仅作标记
     if (!rec.logistics && /物流信息/.test(op)) rec.logistics = "可查(点物流信息)";
@@ -355,7 +401,7 @@ function extractTables(roleKeywords, fields) {
   candidates.forEach((c) => {
     // 订单查询页：每张订单独立成表，直接解析为记录，跳过通用表头映射
     if (orderListMode && orderIdx.has(c.idx)) {
-      const recs = parseOrderTable(c, orderTemplate);
+      const recs = parseOrderTable(c, orderTemplate, logiByTableIdx[c.idx]);
       if (recs) orderRecords.push(recs);
       return;
     }
@@ -809,7 +855,7 @@ function renderTables(tables) {
 function mergeTablesIntoLib(tables) {
   return new Promise((resolve) => {
     const plat = $("platform").value;
-    const sourceLabel = plat === "custom" ? "invoice-harvester/custom" : "invoice-harvester/" + plat;
+    const sourceLabel = plat === "custom" ? "ecom-order-helper/custom" : "ecom-order-helper/" + plat;
     chrome.storage.local.get("invoice_records", (d) => {
       const lib = Array.isArray(d.invoice_records) ? d.invoice_records.slice() : [];
       let added = 0;
@@ -891,7 +937,7 @@ function exportCsv() {
     const a = document.createElement("a");
     const dt = new Date().toISOString().slice(0, 10);
     a.href = url;
-    a.download = `电商开票汇总_${dt}.csv`;
+    a.download = `电商订单信息汇总_${dt}.csv`;
     a.click();
     URL.revokeObjectURL(url);
     log(`已导出 ${lib.length} 条到 CSV`, "ok");
@@ -927,7 +973,7 @@ function exportXlsx() {
     }
     const dt = new Date().toISOString().slice(0, 10);
     try {
-      XLSX.writeFile(wb, `电商开票汇总_${dt}.xlsx`); // 浏览器环境自动触发下载
+      XLSX.writeFile(wb, `电商订单信息汇总_${dt}.xlsx`); // 浏览器环境自动触发下载
       const extra = includeGrouped ? "（含「按抬头汇总」sheet）" : "";
       log(`已导出 ${lib.length} 条到 XLSX${extra}`, "ok");
     } catch (e) {
@@ -968,7 +1014,19 @@ function copyDiag() {
             : [];
           return { idx, totalRows: dataRows.length, headers, firstRow };
         });
-        return { url: location.href, title: document.title, tables };
+        // 表外物流块（订单页物流行在 table 之外时，诊断里直接可见原文）
+        const logiMatched = [];
+        document.querySelectorAll("div, span, p, li").forEach((el) => {
+          if (el.closest && el.closest("table")) return;
+          if (el.querySelector && el.querySelector("table")) return;
+          const t = (el.textContent || "").replace(/\s+/g, " ").trim();
+          if (t && t.length <= 800 && /物流信息[:：]/.test(t)) logiMatched.push(el);
+        });
+        const outerLogi = logiMatched
+          .filter((el) => !logiMatched.some((o) => o !== el && o.contains && o.contains(el)))
+          .map((el) => String(el.textContent).replace(/\s+/g, " ").trim().slice(0, 300))
+          .slice(0, 5);
+        return { url: location.href, title: document.title, tables, outerLogi };
       },
     }, (res) => {
       const data = res && res[0] && res[0].result;
