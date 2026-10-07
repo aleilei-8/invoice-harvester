@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
   "name": "电商订单信息助手",
-  "version": "2.9.0",
-  "description": "通用浏览器插件：在拼多多/淘宝/京东/抖音等电商商家后台抓取订单与开票信息（订单号/物品/订单状态/快递公司/快递单号/发票抬头/税号/金额），支持自动翻页全量采集，本地汇总去重，一键导出 Excel。无需开放平台资质，装上即用。",
-  "permissions": ["activeTab", "scripting", "storage"],
+  "version": "3.3.5",
+  "description": "电商开票助手：1688「导出当前条件」与拼多多订单导出自动捕获解析入库（分区管理，1688 不做自动导出避免重复下载），按快递单号+快递公司匹配，生成按卖家分组开票清单与开票跟踪表，支持开票状态回填。本地处理，不上传服务器。",
+  "permissions": ["activeTab", "scripting", "storage", "downloads"],
   "host_permissions": [
     "https://mms.pinduoduo.com/*",
     "https://*.pinduoduo.com/*",
@@ -15,7 +15,11 @@
     "https://fxg.jinritemai.com/*",
     "https://*.feihong.cc/*",
     "https://*.kuaishou.com/*",
-    "https://*.1688.com/*"
+    "https://*.1688.com/*",
+    "https://*.alicdn.com/*"
+  ],
+  "web_accessible_resources": [
+    { "resources": ["xlsx.full.min.js"], "matches": ["<all_urls>"] }
   ],
   "action": {
     "default_title": "电商订单信息助手",
@@ -23,5 +27,13 @@
   },
   "background": {
     "service_worker": "background.js"
-  }
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://*.1688.com/*"],
+      "js": ["pagefuncs.js"],
+      "all_frames": true,
+      "run_at": "document_start"
+    }
+  ]
 }

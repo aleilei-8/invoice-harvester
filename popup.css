@@ -28,9 +28,20 @@ body {
   padding: 12px 14px;
   background: linear-gradient(135deg, var(--primary), var(--accent));
   color: #fff;
+  position: relative;
 }
 .hd-title { font-size: 15px; font-weight: 700; letter-spacing: .5px; }
 .hd-sub { font-size: 11px; opacity: .9; margin-top: 2px; }
+/* 版本徽标：扩展版本 / 页面内脚本版本。两者不一致=页面需 F5；扩展位显示「未加载」=需在扩展页点重新加载 */
+.hd-ver {
+  position: absolute; top: 10px; right: 12px;
+  font-size: 10px; line-height: 1.4; text-align: right;
+  background: rgba(255, 255, 255, .18);
+  border: 1px solid rgba(255, 255, 255, .35);
+  border-radius: 6px; padding: 3px 6px; cursor: help;
+}
+.hd-ver .ok { color: #d7ffe4; }
+.hd-ver .bad { color: #ffe08a; font-weight: 700; }
 
 .toolbar {
   display: flex;

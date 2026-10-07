@@ -8,40 +8,64 @@
 <body data-page-node-id="xYH2d6mJ4ja7FBPvgCuCTJ">
   <header class="hd" data-page-node-id="jDWkrz8PhLSAUbYw0pu7Pa">
     <div class="hd-title" data-page-node-id="HqbKrKr9ZIUDOWJ4gN1WjF">电商订单信息助手</div>
+    <div class="hd-ver" id="hd-ver" title="扩展版本 / 页面内脚本版本。两者不一致说明页面需按 F5 刷新；扩展显示「未加载」说明需在扩展页点「重新加载」">v?</div>
     <div class="hd-sub" id="status" data-page-node-id="tN9UNGY1uqhsPhVUyzWtCc">选择平台 → 打开商家后台 → 点「抓取」</div>
   </header>
 
-  <section class="toolbar" data-page-node-id="kOEMvm2bOQfgXhQD7nSHso">
-    <button id="btn-grab" class="btn btn-primary" data-page-node-id="yeBpz2gXHG1FA0w9RPP1NH">抓取本页</button>
-    <button id="btn-grab-all" class="btn btn-primary" data-page-node-id="ga01x2y3z4a5b6c7d8e9f0" title="自动回到第 1 页并逐页抓取入库（按订单号去重，最多200页）。抓取循环在网页内运行，网页右上角有进度浮层，弹窗可以关闭。">抓取全部页</button>
-    <button id="btn-stop" class="btn btn-danger" hidden data-page-node-id="stop01x2x3x4x5x6" title="中止页面内的抓取任务（已抓到的页已入库，不会丢）">停止抓取</button>
-    <button id="btn-append" class="btn" data-page-node-id="Ukfc6xTF4q5H4ZjykSn1ZI">追加到汇总库</button>
-    <button id="btn-export-csv" class="btn" data-page-node-id="qF6jG1U2WecY1otMLLCN2M">导出 CSV</button>
-    <button id="btn-export-xlsx" class="btn btn-primary" data-page-node-id="x1x2x3x4x5x6x7x8x9x0x1">导出 XLSX</button>
-    <button id="btn-diag" class="btn btn-mini" data-page-node-id="diag01x2x3x4x5x6x7" title="复制本页所有表格的原始表头+首行，用于适配新平台">复制诊断</button>
-    <button id="btn-clear" class="btn btn-danger" data-page-node-id="4WPptMUrkBV066GDK70mbv">清空库</button>
-    <label class="opt" data-page-node-id="optg01x2x3x4x5"><input type="checkbox" id="opt-group" checked /> 含抬头汇总</label>
-  </section>
-
+  <!-- 平台选择器：常驻顶部（v3.3.0 修复：之前在通用区内部，切到 1688 整块隐藏导致切不回来） -->
   <section class="platform-bar" data-page-node-id="2aDIVC20VBQ6AdTuBgfxow">
     <label class="pb-label" for="platform" data-page-node-id="cySAGeXtnKR4HhhrZedhi5">平台</label>
     <select id="platform" class="pb-select" data-page-node-id="VGjiVTeFvFTJwHC3c7OB9f"></select>
     <button id="btn-kw" class="btn btn-mini" data-page-node-id="7Y4MvqFDqqAcWNZbN0fUMh">编辑关键词</button>
   </section>
 
-  <div id="kw-editor" class="kw-editor" hidden data-page-node-id="vYlVz2S0ICOQ76gJk3aDzE">
-    <div class="kw-tip" data-page-node-id="e9zOnypkGDMND6wrqKPYCj">自定义模式：修改下方 JSON（角色 → 关键词数组）后点「保存」。最长命中关键词优先，可加英文别名（如 tax / order / tracking）。</div>
+  <!-- ═══ 通用平台区（拼多多/淘宝/京东/抖音等：页面 DOM 可抓，支持自动翻页）═══ -->
+  <section id="sec-generic">
+    <section class="toolbar">
+      <button id="btn-grab" class="btn btn-primary">抓取本页</button>
+      <button id="btn-grab-all" class="btn btn-primary" title="自动回到第 1 页并逐页抓取入库（按订单号去重）。抓取循环在网页内运行，网页右上角有进度浮层，弹窗可以关闭。">抓取全部页</button>
+      <button id="btn-stop" class="btn btn-danger" hidden title="中止页面内的抓取任务（已抓到的页已入库，不会丢）">停止抓取</button>
+      <button id="btn-append" class="btn">追加到汇总库</button>
+      <button id="btn-export-csv" class="btn">导出 CSV</button>
+      <button id="btn-export-xlsx" class="btn btn-primary">导出 XLSX</button>
+      <button id="btn-diag" class="btn btn-mini" title="复制本页所有表格的原始表头+首行，用于适配新平台">复制诊断</button>
+      <button id="btn-clear" class="btn btn-danger">清空库</button>
+      <label class="opt"><input type="checkbox" id="opt-group" checked /> 含抬头汇总</label>
+    </section>
+  </section>
+
+  <!-- ═══ 1688 专区（与通用平台完全分开；对应 1688 页面上的两种导出按钮）═══ -->
+  <section id="sec-1688" hidden>
+    <section class="toolbar">
+      <button id="btn-exp-sel" class="btn btn-primary" title="对应 1688 页面「导出所选订单」：只导出当前页勾选的订单（不支持跨页选择）。需先在 1688 页面全选或点选订单，否则按钮置灰">导出所选订单</button>
+      <button id="btn-exp-cond" class="btn btn-primary" title="对应 1688 页面「导出当前条件」：按页面顶部筛选条件导出，条件选「全部」即导出全部订单（★推荐，一次拿全）">导出当前条件</button>
+    </section>
+    <section class="toolbar">
+      <button id="btn-export-a1688" class="btn btn-mini" title="把已解析入库的 1688 订单导出为 XLSX">导出1688汇总表</button>
+      <button id="btn-clear-a1688" class="btn btn-mini" title="清空插件内已解析的 1688 订单库">清空1688库</button>
+    </section>
+  </section>
+
+  <!-- ═══ 全局：开票工作台入口 ═══ -->
+  <section class="toolbar">
+    <button id="btn-match-pdd" class="btn btn-primary" style="width:100%" title="打开开票工作台：按快递单号匹配 1688 与拼多多订单（含快递公司一致性校验），生成按卖家分组开票清单 + 开票跟踪表，支持往期结果文件拖回回填开票状态">开票工作台（匹配 1688 × 拼多多 → 开票清单）</button>
+  </section>
+
+  <div id="kw-editor" class="kw-editor" hidden>
+    <div class="kw-tip">自定义模式：修改下方 JSON（角色 → 关键词数组）后点「保存」。最长命中关键词优先，可加英文别名（如 tax / order / tracking）。</div>
     <textarea id="kw-edit" class="kw-text" spellcheck="false"></textarea>
-    <div class="kw-actions" data-page-node-id="uChhyNRZn13bgAaf4OYInz">
-      <button id="btn-kw-save" class="btn btn-mini btn-primary" data-page-node-id="33aoYRx7a7TlfaD3SbMnjj">保存</button>
-      <button id="btn-kw-reset" class="btn btn-mini" data-page-node-id="J3vbiyhfFFdjG9JU1IrFfE">恢复默认</button>
-      <span id="kw-msg" class="kw-msg" data-page-node-id="vs0mIhYVMK2prQTzw9OqSx"></span>
+    <div class="kw-actions">
+      <button id="btn-kw-save" class="btn btn-mini btn-primary">保存</button>
+      <button id="btn-kw-reset" class="btn btn-mini">恢复默认</button>
+      <span id="kw-msg" class="kw-msg"></span>
     </div>
   </div>
 
-  <section class="meta" data-page-node-id="R3m8M2J3Ze3LqnuUgJintL">
-    <span class="pill" id="lib-count" data-page-node-id="voP87y26gOVxxFYfZb0U9J">汇总库：0 条</span>
-    <span class="pill pill-soft" id="grab-count" data-page-node-id="upGYQqtWwnQCNMiIFsZtAd">本次抓取：0 张表</span>
+  <section class="meta">
+    <span class="pill" id="lib-count">汇总库：0 条</span>
+    <span class="pill pill-soft" id="a1688-count">1688已解析：0 条</span>
+    <span class="pill pill-soft" id="pdd-count">拼多多已入库：0 条</span>
+    <span class="pill pill-soft" id="grab-count">本次抓取：0 张表</span>
   </section>
 
   <section id="tables" class="tables" data-page-node-id="FDEY5E3mY59bPj5uNB0OzH"></section>

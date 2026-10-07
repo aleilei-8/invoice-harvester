@@ -22,6 +22,8 @@ INCLUDE = [
     "pagefuncs.js",
     "xlsx.full.min.js",
     "popup.js",
+    "matcher.html",
+    "matcher.js",
     "background.js",
 ]
 
@@ -52,6 +54,11 @@ def build(ext_dir: str, out_name: str):
         if os.path.isfile(readme):
             zf.write(readme, arcname="README.md")
             written.append("README.md")
+        # 使用说明（v3.3.0：说明文字已从弹窗移出，独立成文件）
+        guide = os.path.join(ext_dir, "使用说明.txt")
+        if os.path.isfile(guide):
+            zf.write(guide, arcname="使用说明.txt")
+            written.append("使用说明.txt")
 
     print(f"已生成：{out_path}")
     print(f"包含文件（{len(written)}）：" + "、".join(written))

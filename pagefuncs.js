@@ -1226,9 +1226,9 @@ function pageKey() {
 // 暴露给「页面内长任务」使用（注入到目标页面的隔离世界里）
 // ver：让弹窗能识别「页面里跑着的循环是不是当前版本的代码」（更新插件后老页面不会自动换代码）
 if (typeof window !== "undefined") {
-  window.__IH_PAGE_VER = "2.9.0";
+  window.__IH_PAGE_VER = "3.0.7";
   window.__IH_PAGE = {
-    ver: "2.9.0", extractTables, clickNextPage, pageSignature, pageKey, pagerInfo, pagerRow,
+    ver: "3.0.7", extractTables, clickNextPage, pageSignature, pageKey, pagerInfo, pagerRow,
     clickPageNumber, pagerCandidates, elClickable, clickEl, goToNextPage, pagerDump,
   };
 }
@@ -1488,4 +1488,909 @@ async function grabAllInPage(roleKeywords, fields, maxPages) {
   ovPaint(G.curPage || G.page, G.total, G.pages.length, G.lastClick, G.note || ("已抓取 " + G.pages.length + " 页"));
   sleep(12000).then(ovRemove); // 完成提示 12 秒后自动消失（也可点「关闭」）
   return { ok: true, page: G.page, curPage: G.curPage, total: G.pages.length, note: G.note };
+}
+
+// ===== 1688 订单列表：诊断探针（诊断驱动，绝不猜 DOM）=====
+// 1688 订单列表多为现代 div 卡片（非 <table>），且运单号常不在列表行内（藏在「查看物流」/官方导出里）。
+// 因此先做一次诊断，拿到真实结构后再定稿「自动翻页 + 提取」逻辑，避免盲目写选择器。
+function elPath1688(el) {
+  try {
+    const parts = [];
+    let e = el;
+    for (let i = 0; i < 6 && e && e.nodeType === 1; i++) {
+      let s = e.tagName.toLowerCase();
+      if (e.id) s += "#" + e.id;
+      else if (e.className && typeof e.className === "string") {
+        const cs = e.className.trim().split(/\s+/).slice(0, 2).join(".");
+        if (cs) s += "." + cs;
+      }
+      parts.unshift(s);
+      e = e.parentElement;
+    }
+    return parts.join(" > ");
+  } catch (e) { return ""; }
+}
+
+// 找「订单卡片」祖先：从含「订单编号」的叶子向上爬，取第一个含多个订单关键字的容器
+function firstOrderCard1688() {
+  const leaves = Array.from(document.querySelectorAll("*")).filter((el) => {
+    const t = (el.innerText || "").slice(0, 30);
+    // 放宽：订单编号 / 订单号 / 运单号 任一带货信息即算候选叶子（避免在 iframe 列表里漏抓）
+    return /(订单编号|订单号|运单号|物流单号)/.test(t) && el.children.length <= 4;
+  });
+  if (!leaves.length) return null;
+  let el = leaves[0];
+  for (let i = 0; i < 12 && el; i++) {
+    const txt = (el.innerText || "").replace(/\s+/g, " ");
+    const score = (txt.match(/订单编号/g) || []).length
+      + (/卖家/.test(txt) ? 1 : 0) + (/实付/.test(txt) ? 1 : 0)
+      + (/货品|商品/.test(txt) ? 1 : 0) + (/物流|运单/.test(txt) ? 1 : 0);
+    if (score >= 2 && el.querySelectorAll("*").length > 5) return el;
+    el = el.parentElement;
+  }
+  return leaves[0].parentElement || leaves[0];
+}
+
+// 安装网络探针：捕获「导出所选订单/导出」触发的 fetch / XHR（含 URL、参数、响应体），
+// 用于后续「自动翻页 + 驱动官方导出 + 页内合并为单文件」（官方导出含运单号，fidelity 最高）。
+// 1688 导出多为 fetch 下载（response 是 xlsx 二进制或 JSON），这里把响应体也一并捕获：
+//   - 文本/JSON：截取前 1200 字符，便于确认数据结构
+//   - 二进制（xlsx）：记录字节长度 + 前 32 字节魔数（PK\x03\x04 即 zip/xlsx），供后续解析
+// 1688 导出接口网络探针（v3.0.5 起「脚本注入即武装」，无需先点诊断）。
+// 目标：捕获官方「导出所选订单/导出全部」提交请求（method+url+body）及其响应，
+// 以及最终 xlsx 直链，供后续 grab1688() 程序化重放（按页/时间段分段导出后页内合并）。
+function installNetHook1688() {
+  try {
+    if (window.__IH_NET_HOOKED) return;
+    window.__IH_NET_HOOKED = true;
+    window.__IH_NET = window.__IH_NET || [];
+    window.__IH_EXPORT = window.__IH_EXPORT || null;   // 最近一次导出「提交」请求
+    window.__IH_XLSX = window.__IH_XLSX || null;        // 最近一次 xlsx 响应/直链
+    const seen = new Set();
+    const cap = (info) => {
+      try {
+        const key = (info.kind || "") + "|" + (info.url || "");
+        if (seen.has(key)) return;                       // 去重，避免 beacon/打点刷屏
+        if (window.__IH_NET.length >= 120) window.__IH_NET.shift();
+        window.__IH_NET.push(info); seen.add(key);
+      } catch (e) { /* 忽略 */ }
+    };
+    // 静态资源（<script>/<link> 不走 XHR/fetch，这里只是兜底过滤）不参与捕获
+    const isStatic = (u) => /\.(js|css|woff2?|ttf|png|jpe?g|gif|svg|ico|map|webp)(\?|$)/i.test(u || "");
+    // 命中导出/订单/交易/列表/异步任务相关请求（用于标记 __IH_EXPORT）
+    const isExport = (u) => /export|download|订单|order|excel|\.xls|trade|列表|list|task|异步|async|query|search/i.test(u || "");
+    const isSubmit = (u) => /export|order|trade/i.test(u || "");
+    // ── XMLHttpRequest ──（捕获全部非静态请求，导出类额外标记）
+    const OW = window.XMLHttpRequest;
+    const oxhr = OW.prototype.open;
+    OW.prototype.open = function (m, u) { this.__ih_url = String(u); this.__ih_method = m; return oxhr.apply(this, arguments); };
+    const osend = OW.prototype.send;
+    OW.prototype.send = function (b) {
+      const url = this.__ih_url;
+      if (!isStatic(url)) {
+        const req = { kind: "xhr", method: this.__ih_method, url: url, reqBody: b != null ? String(b).slice(0, 4000) : null, t: Date.now() };
+        cap(req);
+        if (isSubmit(url)) window.__IH_EXPORT = req;
+        const self = this;
+        this.addEventListener("load", function () {
+          try {
+            const ct = (self.getResponseHeader && self.getResponseHeader("content-type")) || "";
+            const cd = (self.getResponseHeader && self.getResponseHeader("content-disposition")) || "";
+            let snippet = "";
+            try { snippet = String(self.responseText || "").slice(0, 1500); } catch (e) { /* 二进制响应读不到文本属正常 */ }
+            const info = { kind: "xhr-resp", url: url, status: self.status, contentType: ct, contentDisposition: cd, respHead: snippet, t: Date.now() };
+            cap(info);
+            if (window.__IH_EXPORT && window.__IH_EXPORT.url === url) window.__IH_EXPORT.resp = info;
+          } catch (e) { /* 忽略 */ }
+        });
+      }
+      return osend.apply(this, arguments);
+    };
+    // ── fetch ──
+    const ofetch = window.fetch;
+    window.fetch = function (u, o) {
+      const url = String(u);
+      if (!isStatic(url)) {
+        const req = { kind: "fetch", method: (o && o.method) || "GET", url: url, reqBody: (o && o.body) ? String(o.body).slice(0, 4000) : null, t: Date.now() };
+        cap(req);
+        if (isSubmit(url)) window.__IH_EXPORT = req;
+        return ofetch.apply(this, arguments).then(async (resp) => {
+          try {
+            const ct = (resp.headers && resp.headers.get && resp.headers.get("content-type")) || "";
+            const cd = (resp.headers && resp.headers.get && resp.headers.get("content-disposition")) || "";
+            if (/attachment/.test(cd) || /excel|xls|zip|octet|download/i.test(ct) || /\.xls/i.test(url)) {
+              const buf = await resp.clone().arrayBuffer();
+              const head = Array.from(new Uint8Array(buf.slice(0, 8)));
+              const info = { kind: "fetch-resp", url: url, isBinary: true, contentType: ct, contentDisposition: cd,
+                contentLength: String(buf.byteLength), magicBytes: head,
+                isXlsx: (head[0] === 0x50 && head[1] === 0x4B && head[2] === 0x03 && head[3] === 0x04), t: Date.now() };
+              cap(info); window.__IH_XLSX = info;
+            } else {
+              const txt = await resp.clone().text();
+              const info = { kind: "fetch-resp", url: url, isBinary: false, contentType: ct, contentDisposition: cd,
+                contentLength: String(txt.length), respHead: txt.slice(0, 1500), t: Date.now() };
+              cap(info);
+              if (window.__IH_EXPORT && window.__IH_EXPORT.url === url) window.__IH_EXPORT.resp = info;
+            }
+          } catch (e) { /* 响应体读取失败不影响主流程 */ }
+          return resp;
+        });
+      }
+      return ofetch.apply(this, arguments);
+    };
+    // ── 拦截 <a download> 点击，捕获导出文件直链（「下载」按钮多为此形态） ──
+    document.addEventListener("click", (e) => {
+      try {
+        const a = e.target && e.target.closest ? e.target.closest("a") : null;
+        if (a && a.href && /\.xls/i.test(a.href)) {
+          window.__IH_XLSX = { kind: "anchor", url: a.href, text: (a.innerText || "").slice(0, 40), t: Date.now() };
+        }
+      } catch (e) { /* 忽略 */ }
+    }, true);
+  } catch (e) { /* 忽略 */ }
+}
+
+// 1688 订单列表诊断：frame 感知 + iframe 枚举 + 列表/分页/字段/导出接口探针。
+// 1688 买家工作台是 frame 化 SPA，订单列表常跑在 iframe 子应用里，故诊断必须逐帧进行，
+// 否则顶层帧只能看到导航、抓不到订单 DOM、也拦不到 iframe 内的导出请求。
+function rectArr(el) {
+  const r = (el && el.getBoundingClientRect && el.getBoundingClientRect()) || { x: 0, y: 0, width: 0, height: 0 };
+  return [Math.round(r.x), Math.round(r.y), Math.round(r.width), Math.round(r.height)];
+}
+
+// 渲染感知：1688 订单列表是 Angular SPA，诊断注入时 <app-root> 常尚未注水，
+// 必须轮询等到「导出按钮/订单行」出现再采样，否则采到的全是空壳。
+function waitForOrderUI(timeoutMs) {
+  return new Promise((resolve) => {
+    const t0 = Date.now();
+    const probe = () => {
+      const d = document;
+      const exportBtn = Array.from(d.querySelectorAll("button,a,div,[role=button],span"))
+        .find((e) => /导出/.test((e.innerText || "").replace(/\s+/g, " ")));
+      const rows = d.querySelectorAll("tr").length;
+      const cards = d.querySelectorAll('[class*="order"],[class*="Order"]').length;
+      const ready = !!exportBtn || rows > 0 || cards > 3;
+      if (ready || Date.now() - t0 > timeoutMs) {
+        resolve({ waitedMs: Date.now() - t0, ready: !!ready, foundExport: !!exportBtn, rows, cards });
+      } else {
+        setTimeout(probe, 300);
+      }
+    };
+    probe();
+  });
+}
+
+async function diagnose1688() {
+  const isTop = (window === window.top);
+  const out = {
+    platform: "1688",
+    isTop: isTop,
+    inIframe: !isTop,
+    frameUrl: location.href,
+    frameOrigin: location.origin,
+    title: document.title,
+    ts: Date.now(),
+  };
+  const body = (document.body && document.body.innerText || "").replace(/\s+/g, " ");
+  out.bodySample = body.slice(0, 500);
+  // 本帧是否含订单内容（决定真正的抓取应在哪一帧）
+  const orderSignals = {
+    order_id: /订单编号|订单号/.test(body),
+    seller: /卖家|供应商|供货商|店铺/.test(body),
+    courier: /物流公司|承运商/.test(body),
+    tracking: /运单号/.test(body),
+    amount: /实付款|实付金额|总金额|合计/.test(body),
+    logistics: /物流|快递|速递|速运|包裹/.test(body),
+  };
+  out.inlineFields = orderSignals;
+  // 订单帧信号：正文含订单字段「或」URL/标题命中订单列表页（列表卡片可能渲染在跨域子 iframe，
+  // 正文读不到，但 frameUrl/title 足以定位真正的订单帧）。
+  const urlTitleHit = /buyer-order-list|trade-order-list|已买到的货品|order_list|orderlist/i.test(location.href + " " + document.title);
+  out.hasOrderContent = !!(orderSignals.order_id || orderSignals.tracking
+    || (orderSignals.logistics && orderSignals.seller) || urlTitleHit);
+  out.urlTitleHit = urlTitleHit;
+  // 渲染感知：订单帧是 Angular SPA，诊断需等注水完成才能采到真实控件（导出/下一页/全选）
+  out.renderWait = null;
+  if (urlTitleHit) {
+    try { out.renderWait = await waitForOrderUI(8000); } catch (e) { out.renderWait = "err:" + e.message; }
+  }
+  out.tableCount = document.querySelectorAll("table").length;
+  out.sampleOrderIds = (body.match(/[0-9]{15,}/g) || []).slice(0, 6);
+  // ── 关键控件探测：全选 / 导出 / 下一页（用于后续自动翻页+驱动导出） ──
+  const btnTxt = (el) => ((el.innerText || el.getAttribute("title") || el.getAttribute("aria-label") || el.value || el.alt || "").toString().replace(/\s+/g, " ").trim());
+  const clickable = Array.from(document.querySelectorAll("button,a,input,[role=button],[class*='btn'],div,[onclick]"));
+  const btnRe = /导出|全选|下一页|上一页|尾页|首页|共\s*\d+\s*页|第\s*\d+\s*页|页$/;
+  const btns = [];
+  for (const el of clickable) {
+    const t = btnTxt(el);
+    const lower = t.toLowerCase();
+    if (btnRe.test(t) || /export|select.?all|next|prev/i.test(lower)) {
+      const r = (el.getBoundingClientRect && el.getBoundingClientRect()) || { width: 0, height: 0 };
+      if (r.width === 0 && r.height === 0 && el.tagName !== "A") continue;
+      btns.push({ tag: el.tagName, cls: String(el.className || "").slice(0, 80), text: t.slice(0, 40), id: el.id || "", rect: [Math.round(r.x), Math.round(r.y), Math.round(r.width), Math.round(r.height)] });
+    }
+  }
+  out.buttons = btns.slice(0, 40);
+  out.buttonCount = btns.length;
+  // 全量可点元素文案（去重、截断）——用于拿到「批量导出」面板的真实按钮文字，据此定稿自动导出
+  try {
+    out.allButtonTexts = Array.from(document.querySelectorAll("button,a,[role=button],li,span,label"))
+      .map(btnTxt).filter((t) => t && t.length <= 24)
+      .filter((t, i, a) => a.indexOf(t) === i).slice(0, 90);
+  } catch (e) { out.allButtonTexts = []; }
+  // 勾选框（全选通常在列表表头）
+  const cbs = Array.from(document.querySelectorAll("input[type=checkbox],input[type=radio]"));
+  out.checkboxCount = cbs.length;
+  out.checkboxSample = cbs.slice(0, 8).map((c) => ({ cls: String(c.className || "").slice(0, 60), id: c.id || "", checked: !!c.checked, ariaLabel: c.getAttribute("aria-label") || "" }));
+  // 精确定位导出/翻页/全选控件（供定稿自动抓取直接命中，避免猜选择器）
+  const btnTextOf = (e) => ((e.innerText || e.getAttribute("title") || e.getAttribute("aria-label") || "").toString().replace(/\s+/g, " ").trim());
+  const findBtn = (re) => Array.from(document.querySelectorAll("button,a,div,[role=button],span,li")).find((e) => re.test(btnTextOf(e)));
+  const eb = findBtn(/导出/);
+  out.exportButton = eb ? { tag: eb.tagName, cls: String(eb.className || "").slice(0, 90), text: btnTextOf(eb).slice(0, 40), id: eb.id || "", ariaLabel: eb.getAttribute("aria-label") || "", rect: rectArr(eb) } : null;
+  const nb = findBtn(/下一页|下页|›|»|next/i);
+  out.nextPageButton = nb ? { tag: nb.tagName, cls: String(nb.className || "").slice(0, 90), text: btnTextOf(nb).slice(0, 30), id: nb.id || "", rect: rectArr(nb) } : null;
+  const cbAll = Array.from(document.querySelectorAll("input[type=checkbox]")).find((c) => {
+    const l = (c.getAttribute("aria-label") || c.getAttribute("title") || (c.closest("[class*='header']") ? "header" : "")).toLowerCase();
+    return /全选|select.?all|header|表头/.test(l);
+  }) || document.querySelector("input[type=checkbox]");
+  out.selectAllCheckbox = cbAll ? { cls: String(cbAll.className || "").slice(0, 60), id: cbAll.id || "", ariaLabel: cbAll.getAttribute("aria-label") || "", inHeader: !!cbAll.closest("[class*='header']") } : null;
+  const pt = (document.body && document.body.innerText || "").match(/共\s*\d+\s*页|第\s*\d+\s*\/\s*\d+\s*页|\d+\s*\/\s*\d+\s*页/);
+  out.pagerText = pt ? pt[0] : null;
+  // 本帧 HTML 取样（截断，便于看清真实按钮 class / 列表结构；跨域子 iframe 内容读不到属正常）
+  try { out.htmlSample = (document.body && document.body.innerHTML || "").slice(0, 6000); } catch (e) { out.htmlSample = ""; }
+  // 分页器（复用已验证引擎）
+  try { out.pager = (typeof pagerInfo === "function") ? pagerInfo() : null; } catch (e) { out.pager = "err:" + e.message; }
+  try { out.pagerDump = (typeof pagerDump === "function") ? pagerDump() : null; } catch (e) { out.pagerDump = "err:" + e.message; }
+  // 订单卡片容器探测
+  const card = firstOrderCard1688();
+  out.orderCard = card ? {
+    tag: card.tagName, cls: String(card.className || "").slice(0, 90),
+    path: elPath1688(card), childCount: card.querySelectorAll("*").length,
+  } : null;
+  out.sampleCardText = card ? card.innerText.replace(/\s+/g, " ").slice(0, 1500) : null;
+  // 列出本帧内的 iframe（顶层帧最关键；订单列表常跑在 iframe 子应用里）
+  const iframes = Array.from(document.querySelectorAll("iframe")).map((f) => ({
+    src: f.src || "", id: f.id || "", name: f.name || "", cls: String(f.className || "").slice(0, 60),
+  }));
+  out.iframeCount = iframes.length;
+  out.iframes = iframes;
+  // 导出接口网络探针（本帧安装；allFrames 注入后每帧都会装，故 iframe 内的导出也能捕获）
+  installNetHook1688();
+  out.netHook = "若 exportApi 一直为空，说明 content_scripts 未在该页面加载时武装（页面在装扩展前已打开）。点弹窗「武装网络探针」即可免刷新即时武装；或直接点「下载」让 chrome.downloads 捕获 xlsx（不依赖探针）。downloads 字段来自 chrome.downloads 直查，只要点过「下载」就一定有。";
+  out.netCaptured = window.__IH_NET ? window.__IH_NET.slice(-12) : [];
+  out.exportApi = window.__IH_EXPORT || null;   // 最近一次捕获到的导出「提交」请求（method+url+body+响应）
+  out.xlsxCaptured = window.__IH_XLSX || null;  // 最近一次捕获到的 xlsx 直链/响应
+  // 直接查询浏览器下载（比仅读 storage 更可靠：只要点过「下载」，这里一定有；
+  // 且它不依赖 content_scripts 武装，后台始终在监听 chrome.downloads）
+  let dlQuery = [];
+  try {
+    dlQuery = await new Promise((res) => {
+      if (chrome && chrome.downloads && chrome.downloads.query) {
+        chrome.downloads.query({ orderBy: ["-startTime"], limit: 12 }, (items) => {
+          res((items || [])
+            .filter((it) => /\.xls/i.test(it.filename || it.url || ""))
+            .map((it) => ({ id: it.id, url: it.url, filename: it.filename, startTime: it.startTime, state: it.state, mime: it.mime })));
+        });
+      } else res([]);
+    });
+  } catch (e) { dlQuery = []; }
+  out.downloads = dlQuery;
+  // 后台已用 SheetJS 自动解析并入库的 1688 订单数（点「下载」后自动产生）
+  let a1688 = 0;
+  try {
+    const s = await new Promise((res) => chrome.storage.local.get({ a1688_orders: [] }, (x) => res(x)));
+    a1688 = (s.a1688_orders || []).length;
+  } catch (e) { a1688 = 0; }
+  out.a1688Count = a1688;
+  return out;
+}
+
+// 1688 自动抓取（v3.0.12）。
+// 血泪教训：**不能靠 URL 正则判断「哪一帧是订单帧」**——g.alicdn.com/platform/xdomain-storage/frame.html
+// 这类跨域桥接帧的 hash 里 URL 编码携带了 buyer-order-list.html，会被误判成订单帧，而它内部没有任何控件，
+// 于是「共尝试 0 页」。现在改为：① 桥接帧直接跳过；② 以「DOM 里有没有订单/导出控件」为判据；
+// ③ 弹窗侧先给所有帧打分选帧（probe1688Frames），再定点执行本函数。
+// 导出链（与 1688 买家订单页实际按钮对齐）：
+//   优先「导出当前条件」= 当前筛选下的全部订单，一次拿全，不必逐页；
+//   兜底「全选 → 导出所选订单 → 下载」逐页导出（每页上限 100/实际 pageSize）。
+async function grab1688(opts) {
+  opts = opts || {};
+  const log = [];
+  const L = (m) => { log.push(String(m)); };
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const TXT = (e) => ((e.innerText || e.textContent || e.getAttribute("title") || e.getAttribute("aria-label") || e.value || "").toString().replace(/\s+/g, " ").trim());
+  const visible = (e) => { try { const r = e.getBoundingClientRect(); return !!r && r.width > 0 && r.height > 0; } catch (x) { return false; } };
+  // ★ 穿透 Shadow DOM（v3.0.14）：1688 订单列表(air.1688.com)把整块 UI 渲染在 shadow root 内，
+  //   querySelectorAll / innerText 默认进不去 → document.body.innerText 只剩 1 个字符、按钮列表为空
+  //   （帧体检实证：frame 179 标题=已买到的货品 但 bodyLen=1）。故所有查询都要递归进 shadowRoot。
+  const shadowRoots = () => {
+    const acc = [];
+    const walk = (root) => {
+      try { root.querySelectorAll("*").forEach((el) => { if (el.shadowRoot) { acc.push(el.shadowRoot); walk(el.shadowRoot); } }); }
+      catch (e) { /* 忽略 */ }
+    };
+    walk(document);
+    return acc;
+  };
+  const deepAll = (sel) => {
+    const out = [];
+    try { document.querySelectorAll(sel).forEach((e) => out.push(e)); } catch (e) { /* 忽略 */ }
+    shadowRoots().forEach((r) => { try { r.querySelectorAll(sel).forEach((e) => out.push(e)); } catch (e) { /* 忽略 */ } });
+    return out;
+  };
+  const deepText = () => {
+    let s = String((document.body && document.body.innerText) || "");
+    shadowRoots().forEach((r) => { try { s += " " + String(r.textContent || ""); } catch (e) { /* 忽略 */ } });
+    return s.replace(/\s+/g, " ");
+  };
+  // 只认「短文案 + 可见」的元素并按文案长度升序，避免匹配到包含该字样的外层大容器
+  const findBtns = (re, maxLen) => {
+    const lim = maxLen || 20;
+    return deepAll("button,a,[role=button],span,li,label,div")
+      .filter((e) => visible(e))
+      .map((e) => ({ e: e, t: TXT(e) }))
+      .filter((x) => x.t && x.t.length <= lim && re.test(x.t))
+      .sort((a, b) => a.t.length - b.t.length);
+  };
+  // Angular/React 下单纯 el.click() 偶尔不触发，补发指针事件
+  // v3.3.5：不再额外 dispatch 合成 click——原来「合成 click + host.click()」会把页面
+  // 点击 handler 触发两次（1688 导出场景实证：一次点击创建两个导出任务 → 下载两份
+  // 相同清单，Downloads 里 26779115/26779116 两个连续任务 ID 同秒创建）。
+  // 保留 pointer/mouse 按下抬起序列维持按压态，click 只由 host.click() 派发一次。
+  const clickEl = (el) => {
+    const host = (el.closest && (el.closest("button,a,[role=button]")) || el);
+    try { ["pointerdown", "mousedown", "mouseup"].forEach((t) => host.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window }))); } catch (e) { /* 忽略 */ }
+    try { host.click(); } catch (e) { /* 忽略 */ }
+    return TXT(host) || TXT(el);
+  };
+  // ★ v3.0.15：按「文本节点」反查控件。
+  //   起因：deepText 里明明命中「导出按钮」，但 findBtns（要求「可见」+「文案 ≤12 字」）一个都找不到。
+  //   说明导出入口此刻没渲染成可见按钮（折叠/懒渲染），或「导出」二字只存在于 <script>/<template> 文本里。
+  //   TreeWalker 直接扫文本节点：不触发 innerText 的强制布局、也不依赖元素标签，Shadow DOM 内同样有效。
+  const nodesContaining = (kw) => {
+    const out = [];
+    const seen = [];
+    [document].concat(shadowRoots()).forEach((r) => {
+      try {
+        const tw = document.createTreeWalker(r, NodeFilter.SHOW_TEXT, null, false);
+        let n;
+        while ((n = tw.nextNode())) {
+          if (String(n.nodeValue || "").indexOf(kw) === -1) continue;
+          const p = n.parentElement;
+          if (!p) continue;
+          // 脚本/模板/样式里的字样不是按钮 → 排除（这正是 deepText 会误命中的地方）
+          if (/^(SCRIPT|STYLE|TEMPLATE|NOSCRIPT|HEAD)$/.test(String(p.tagName || "").toUpperCase())) continue;
+          if (seen.indexOf(p) === -1) { seen.push(p); out.push(p); }
+        }
+      } catch (e) { /* 忽略 */ }
+    });
+    return out;
+  };
+  // 把「文字所在元素」提升为真正可点的按钮：最多上溯 5 层，优先 <button>/<a>/role=button，
+  // 其次第一个「可见且文案 ≤40 字」的祖先；跨 shadow 边界时用 getRootNode().host 继续往上。
+  const elevate = (el) => {
+    let cur = el;
+    let firstVisible = null;
+    for (let i = 0; i < 5 && cur; i++) {
+      const tag = String(cur.tagName || "").toLowerCase();
+      const role = cur.getAttribute ? cur.getAttribute("role") : "";
+      if (tag === "button" || tag === "a" || role === "button") return cur;
+      const t = TXT(cur).trim();
+      if (visible(cur) && t && t.length <= 40 && !firstVisible) firstVisible = cur;
+      cur = cur.parentElement || (cur.getRootNode && cur.getRootNode().host) || null;
+    }
+    return firstVisible || el;
+  };
+  // 由「文本关键词」反查可点按钮（跨 Shadow DOM）。kws 是关键词数组，返回去重后的 {e,t} 列表。
+  const btnsFromText = (kws) => {
+    const seen = [];
+    const out = [];
+    kws.forEach((kw) => nodesContaining(kw).forEach((p) => {
+      const el = elevate(p);
+      if (seen.indexOf(el) !== -1) return;
+      seen.push(el);
+      const t = TXT(el).trim();
+      if (t && t.length <= 30) out.push({ e: el, t: t });
+    }));
+    return out;
+  };
+  // 找一个含「导出」的可点控件：先精确文案、再兜底任意含关键词的（跨 Shadow DOM）
+  const findExportBtn = (exactRe) => {
+    const hits = [];
+    nodesContaining("导出").forEach((p) => {
+      const el = elevate(p);
+      const t = TXT(el).trim();
+      if (!t || t.length > 40) return;
+      if (hits.some((h) => h.e === el)) return;
+      hits.push({ e: el, t: t });
+    });
+    if (!hits.length) return { hits: [], pick: null };
+    const exact = hits.filter((h) => exactRe.test(h.t)).sort((a, b) => a.t.length - b.t.length);
+    const vis = (exact.length ? exact : hits).filter((h) => visible(h.e));
+    return { hits: hits, pick: vis[0] || exact[0] || hits[0] || null };
+  };
+  // 全量排查日志：把含「导出」的元素连 tag/尺寸/可见性一起摊出来，便于精确定位是「没渲染」还是「渲染了但不可见」
+  const dumpExport = (hits) => {
+    if (!hits || !hits.length) {
+      L("  · 全表（含 ShadowRoot）没有任何含「导出」的元素 → deepText 命中的字样来自 <script>/<template>，导出入口此刻未渲染");
+      return;
+    }
+    L("  · 含「导出」的元素 " + hits.length + " 个，逐个摊开：");
+    hits.slice(0, 12).forEach((h, i) => {
+      let box = "尺寸未知";
+      try { const b = h.e.getBoundingClientRect(); box = Math.round(b.width) + "×" + Math.round(b.height) + " @y" + Math.round(b.top); } catch (e) { /* 忽略 */ }
+      L("    " + (i + 1) + ". 「" + h.t.slice(0, 24) + "」 <" + String(h.e.tagName || "").toLowerCase() + "> " + box + (visible(h.e) ? "" : " 【不可见】"));
+    });
+  };
+  // 懒渲染兜底：把窗口与所有可滚动容器滚到底再滚回原位，逼出底部操作栏（1688 常把导出条懒渲染）
+  const revealBars = async () => {
+    try {
+      const y = window.scrollY || 0;
+      window.scrollTo(0, (document.body && document.body.scrollHeight) || 0);
+      await sleep(700);
+      window.scrollTo(0, y);
+    } catch (e) { /* 忽略 */ }
+    try {
+      deepAll("div,section,main,ul,ol,tbody").slice(0, 3000).forEach((e) => {
+        try { if (e.clientHeight > 100 && e.scrollHeight > e.clientHeight + 80) e.scrollTop = e.scrollHeight; } catch (x) { /* 忽略 */ }
+      });
+    } catch (e) { /* 忽略 */ }
+    await sleep(1000);
+    try { deepAll("div,section,main,ul,ol,tbody").slice(0, 3000).forEach((e) => { try { e.scrollTop = 0; } catch (x) { /* 忽略 */ } }); } catch (e) { /* 忽略 */ }
+    await sleep(600);
+  };
+  const frameUrl = location.href;
+  // ① 跨域桥接帧：绝不在这里抓
+  if (/xdomain-storage/i.test(frameUrl)) return { skipped: true, reason: "bridge-frame", frame: frameUrl.slice(0, 120), log };
+  const bodyText = () => deepText();
+  // ② 判据：DOM 里有没有订单导出控件 / 订单字样（不再只看 URL 正则；且穿透 Shadow DOM）
+  const hasExportUI = /导出所选订单|导出当前条件|导出全部|导出当前页|批量导出|批量付款/.test(bodyText());
+  const urlHit = /buyer-order-list|trade-order-list|已买到的货品|buyList|买家工作台/i.test(frameUrl + " " + document.title);
+  if (!opts.force && !hasExportUI && !urlHit) return { skipped: true, reason: "no-order-ui", frame: frameUrl.slice(0, 120), log };
+  const srCount = shadowRoots().length;
+  L("订单帧开始抓取: " + frameUrl.slice(0, 120));
+  L("帧内证据：导出控件=" + (hasExportUI ? "有" : "无") + " / URL或标题命中=" + (urlHit ? "是" : "否") + " / ShadowRoot×" + srCount + " / 可见正文 " + bodyText().length + " 字");
+  const allBtns = findBtns(/./, 16).map((x) => x.t).filter((t, i, a) => a.indexOf(t) === i).slice(0, 30);
+  L("可见控件：" + (allBtns.length ? allBtns.join(" │ ") : "(空)"));
+  const maxPages = opts.maxPages || 200;
+  // 读插件「a1688_orders」库当前条数（content script 可直接访问 chrome.storage）
+  const getCount = () => new Promise((res) => {
+    try { chrome.storage.local.get({ a1688_orders: [] }, (d) => res(Array.isArray(d.a1688_orders) ? d.a1688_orders.length : 0)); }
+    catch (e) { res(0); }
+  });
+  // 自适应等待：后台把 xlsx 解析并入 a1688_orders，轮询条数增长即代表已入库
+  const waitDownload = async (since, timeoutMs) => {
+    const t0 = Date.now();
+    while (Date.now() - t0 < timeoutMs) {
+      const n = await getCount();
+      if (n > since) return n;
+      await sleep(1000);
+    }
+    return await getCount();
+  };
+  // 找「下载」入口：导出记录列表里的下载可能是 a/button/span/图标，取页面上最上面那一条（最新报表在最上）
+  const findDownloadLinks = () => deepAll("a,button,span,div")
+    .map((e) => ({ e: e, t: TXT(e).trim() }))
+    .filter((x) => /下载/.test(x.t) && x.t.length <= 8 && visible(x.e))
+    .sort((a, b) => { try { return a.e.getBoundingClientRect().top - b.e.getBoundingClientRect().top; } catch (x) { return 0; } });
+  // 自适应等待「下载」链接出现（导出任务生成需数秒，不再死等固定时长）
+  const waitDownloadLink = async (timeoutMs) => {
+    const t0 = Date.now();
+    while (Date.now() - t0 < timeoutMs) {
+      const dls = findDownloadLinks();
+      if (dls.length) return dls[0].e;
+      await sleep(1000);
+    }
+    return null;
+  };
+  // 导出常带二次确认弹窗（确定/确认导出/继续）
+  const clickConfirm = () => {
+    const c = findBtns(/^(确定|确认|确认导出|继续|继续导出|立即导出|好的|我知道了)$/, 10)[0];
+    if (c) { const t = clickEl(c.e); L("已点确认弹窗「" + t + "」"); return true; }
+    return false;
+  };
+  // ★ v3.0.16：1688 的「批量导出」弹窗（标题「批量导出」，正文提示"两次导出间隔 ≥5 秒 / 报表保管 30 天"）
+  //   两颗按钮是「查看过往导出报表」和「生成新报表」——既不是「确定」也不是「下载」，
+  //   旧逻辑只找 确定/确认 就干等，永远等不到 → 这里显式处理。
+  //   正确流程：生成新报表 →（等生成）→ 查看过往导出报表 → 点最新那条「下载」。
+  const handleExportDialog = async () => {
+    await sleep(1200);
+    const cand = btnsFromText(["生成", "报表", "导出", "查看"]);
+    const uniq = cand.filter((h, i, a) => a.findIndex((x) => x.t === h.t) === i);
+    const pick = (re) => uniq.filter((h) => re.test(h.t)).sort((a, b) => a.t.length - b.t.length)[0] || null;
+    const gen = pick(/生成新报表|生成报表/) || pick(/^生成/);
+    const past = pick(/查看过往导出报表|过往导出报表|导出报表|导出记录/);
+    if (!gen && !past) return false;
+    L("检测到「批量导出」弹窗，按钮：" + uniq.map((h) => h.t).slice(0, 8).join(" │ "));
+    if (gen) { clickEl(gen.e); L("已点击「" + gen.t + "」生成新报表（1688 要求两次导出间隔 ≥5 秒）"); await sleep(5000); }
+    let dl = findDownloadLinks()[0];
+    if (!dl && past) {
+      clickEl(past.e); L("已点击「" + past.t + "」查看导出记录"); await sleep(3000);
+      const d2 = await waitDownloadLink(20000);
+      if (d2) dl = { e: d2 };
+    }
+    if (dl) { clickEl(dl.e); L("已点击「下载」"); return true; }
+    L("⚠ 已处理导出弹窗，但没捕捉到「下载」链接（若浏览器直接下载，后台仍会入库）");
+    return true;
+  };
+  // 1688 明示「两次导出间隔 ≥5 秒」，逐页导出必须留足间隔，否则会被平台拒
+  let lastExportAt = 0;
+  const respectExportGap = async () => {
+    const need = 6000 - (Date.now() - lastExportAt);
+    if (lastExportAt && need > 0) { L("（距上次导出不足 5 秒，等待 " + Math.ceil(need / 1000) + "s）"); await sleep(need); }
+    lastExportAt = Date.now();
+  };
+  // 兜底：1688 保管 30 天内的导出报表 → 把「查看过往导出报表」里能下的都拉一遍。
+  // 后台按订单号去重合并，**重复下载无害**，所以历史报表能被这条直接补全。
+  const harvestPastReports = async (maxDl) => {
+    const past = btnsFromText(["报表", "导出"]).filter((h) => /查看过往导出报表|过往导出报表|导出报表/.test(h.t)).sort((a, b) => a.t.length - b.t.length)[0];
+    if (!past) { L("找不到「查看过往导出报表」入口，跳过历史报表兜底"); return 0; }
+    clickEl(past.e); L("打开导出记录（「" + past.t + "」）…");
+    await sleep(3000);
+    let total = 0;
+    for (let i = 0; i < (maxDl || 12); i++) {
+      const next = findDownloadLinks().find((x) => !x.e.__ihDl);
+      if (!next) { if (i === 0) L("导出记录里没有可点的「下载」链接"); break; }
+      next.e.__ihDl = true;
+      const before = await getCount();
+      clickEl(next.e);
+      L("点击导出记录里的「下载」（第 " + (i + 1) + " 条）");
+      const after = await waitDownload(before, 25000);
+      if (after > before) { total += after - before; L("  → 入库 +" + (after - before) + "（库内共 " + after + " 条）"); }
+      else L("  → 该条未产生新增（可能已下过/还没生成好）");
+      await sleep(1500);
+    }
+    if (total) L("✅ 历史导出报表兜底：共补入 " + total + " 条");
+    return total;
+  };
+  const clickSelectAll = () => {
+    const byTxt = findBtns(/^全选(本页|当前页|全部)?$/, 14)[0];
+    if (byTxt) return clickEl(byTxt.e);
+    const cb = deepAll("input[type=checkbox]").find((c) => visible(c));
+    if (cb) { try { cb.click(); } catch (e) { /* 忽略 */ } return "表头勾选框"; }
+    return "";
+  };
+  // 读取当前页码（1688 分页器常见「X / Y」或高亮数字）
+  const curPageNo = () => {
+    const txt = bodyText();
+    const m = txt.match(/第\s*(\d+)\s*页|(\d+)\s*\/\s*(\d+)\s*页/);
+    if (m) return parseInt(m[1] || m[2], 10);
+    const cur = deepAll('[aria-current="page"]')[0];
+    if (cur) { const n = parseInt(String(TXT(cur)).replace(/\D/g, ""), 10); if (n) return n; }
+    return 0;
+  };
+  // 估算总量（= 总页数 × 每页条数），用于判断「导出当前条件」是否真的一次拿全
+  let pageSize = 10;
+  try { const ps = parseInt(new URL(frameUrl).searchParams.get("pageSize") || "0", 10); if (ps > 0 && isFinite(ps)) pageSize = ps; } catch (e) { /* 用默认 10 */ }
+  let totalPages = 0;
+  const pm = bodyText().match(/(\d+)\s*\/\s*(\d+)\s*页?/);
+  if (pm) totalPages = parseInt(pm[2], 10) || 0;
+  const estTotal = totalPages ? totalPages * pageSize : 0;
+
+  let since = await getCount();
+  L("起始库内 " + since + " 条；分页信息：共 " + (totalPages || "?") + " 页 × 每页 " + pageSize + " 条 → 估算总量 " + (estTotal || "未知") + " 条");
+
+  // ── 阶段 A：一次性「导出当前条件」（当前筛选下的全部订单，一次拿全，最省事）──
+  L("正在定位导出控件（先滚动一遍，逼出可能懒渲染的底部操作栏）…");
+  await revealBars();
+  const rA = findExportBtn(/导出当前条件|导出全部符合条件|导出符合当前条件|按当前条件导出|全部导出|导出全部|导出筛选结果/);
+  const expAll = rA.pick;
+  if (expAll) {
+    L("检测到「" + expAll.t + "」，尝试一次性导出当前筛选条件下的全部订单…");
+    await respectExportGap();
+    clickEl(expAll.e);
+    await sleep(1200);
+    const dlgA = await handleExportDialog();
+    if (!dlgA) {
+      clickConfirm();
+      const dl = await waitDownloadLink(25000);
+      if (dl) { clickEl(dl); L("已点击「下载」"); }
+      else L("25s 内未出现「下载」链接（若浏览器直接下载，后台仍会捕获，无需担心）");
+    }
+    const n = await waitDownload(since, 45000);
+    if (n > since) {
+      const got = n - since;
+      L("一次性导出入库 +" + got + " 条（库内共 " + n + " 条）");
+      if (estTotal && got >= estTotal * 0.9) {
+        L("✅ 已覆盖估算总量（" + got + "/" + estTotal + "），判定一次拿全，结束抓取");
+        return { log, frame: frameUrl.slice(0, 120), exportApi: window.__IH_EXPORT || null, total: n, mode: "exportAll" };
+      }
+      if (!estTotal && got >= 100) {
+        L("✅ 未取得分页信息但已入库 " + got + " 条（≥100），判定一次拿全，结束抓取");
+        return { log, frame: frameUrl.slice(0, 120), exportApi: window.__IH_EXPORT || null, total: n, mode: "exportAll" };
+      }
+      L("⚠ 只拿到 " + got + " 条" + (estTotal ? "（估算总量 " + estTotal + "）" : "") + "，说明「导出当前条件」是页级的，继续逐页补齐（已入库的去重保留）");
+      since = n;
+    } else {
+      L("⚠ 一次性导出未入库 → 试着从「导出记录」把 30 天内的历史报表补全…");
+      await harvestPastReports(12);
+      const n2 = await getCount();
+      if (n2 > since) { L("历史报表补入 +" + (n2 - since) + " 条（库内共 " + n2 + " 条）"); since = n2; }
+      else L("导出记录也没有新增，回退到「全选 + 逐页导出所选订单」");
+    }
+    await sleep(1000);
+  } else {
+    L("未发现「导出当前条件」按钮，走逐页导出");
+    L("── 导出入口排查（含「导出」文本的候选）──");
+    dumpExport(rA.hits);
+  }
+
+  // ── 阶段 B：逐页「全选 → 导出所选订单 → 下载 → 翻页」──
+  let page = 1;
+  let stall = 0;
+  for (; page <= maxPages; page++) {
+    L("── 第 " + page + " 页（库内 " + since + " 条）──");
+    const sa = clickSelectAll();
+    if (sa) { L("已点击「" + sa + "」"); await sleep(800); }
+    else L("⚠ 未找到「全选」控件");
+    // 1688 点表头全选后常弹出「全选本页 / 全选全部」二选一，跟着点一次
+    const scope = findBtns(/^(全选本页|全选当前页|全选全部|全选所有.*|选择全部.*)$/, 14)[0];
+    if (scope && scope.t !== sa) { L("已点全选范围「" + clickEl(scope.e) + "」"); await sleep(800); }
+    // 有些站点的导出按钮要在「勾选」之后才渲染出来 → 找不到就再滚动唤醒一次后重扫
+    const RE = /导出所选订单|导出选中订单|导出所选|导出当前页|导出选中/;
+    let rB = findExportBtn(RE);
+    if (!rB.pick) { await revealBars(); rB = findExportBtn(RE); }
+    const expSel = rB.pick;
+    if (!expSel) {
+      L("⚠ 未找到导出按钮，终止");
+      L("── 导出入口排查（点过「全选」后仍未出现导出控件）──");
+      dumpExport(rB.hits);
+      break;
+    }
+    await respectExportGap();
+    clickEl(expSel.e);
+    L("已点击「" + expSel.t + "」");
+    await sleep(1200);
+    const dlgB = await handleExportDialog();
+    if (!dlgB) {
+      clickConfirm();
+      const dl = await waitDownloadLink(25000);
+      if (dl) { clickEl(dl); L("已点击「下载」"); }
+      else L("25s 内未出现「下载」链接（若浏览器直接下载，后台仍会捕获）");
+    }
+    const after = await waitDownload(since, 45000);
+    if (after > since) { L("已入库（库内 " + after + " 条，+" + (after - since) + "）"); since = after; stall = 0; }
+    else {
+      stall++;
+      L("⚠ 本页未检测到新增（连续 " + stall + " 次）");
+      if (stall >= 2) { L("连续两页无新增，判定无法继续导出，结束抓取"); break; }
+    }
+    await sleep(900);
+    // 翻页
+    const beforePage = curPageNo();
+    const next = findBtns(/下一页|下页|^›$|^»$|^>$|next/i, 8)[0];
+    if (next) { clickEl(next.e); L("已点击「下一页」"); }
+    else { L("未找到「下一页」按钮（可能已是末页），结束抓取"); break; }
+    await sleep(2600);
+    const afterPage = curPageNo();
+    if (beforePage && afterPage && afterPage <= beforePage) { L("页码未推进（" + beforePage + "→" + afterPage + "），判定已到末页，结束抓取"); break; }
+  }
+  const total = await getCount();
+  L("抓取结束，共尝试 " + (page - 1) + " 页；库内 1688 订单合计 " + total + " 条");
+  return { log, frame: frameUrl.slice(0, 120), exportApi: window.__IH_EXPORT || null, total, mode: "paged" };
+}
+
+// ═══ v3.3.0：单次受控导出（顶层，供弹窗定点调用）═══
+// 教训固化：绝不自动循环、绝不重试、绝不遍历历史报表（v3.2.0 疯狂下载事故）。
+// 用户在弹窗点一下 → 这里只点一次页面导出按钮 → 处理确认/批量导出弹窗 → 结束。
+// 下载后的 xlsx 由后台 chrome.downloads 被动捕获解析入库。
+(function () {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const TXT = (e) => ((e.innerText || e.textContent || e.getAttribute("title") || e.getAttribute("aria-label") || e.value || "").toString().replace(/\s+/g, " ").trim());
+  const visible = (e) => { try { const r = e.getBoundingClientRect(); return !!r && r.width > 0 && r.height > 0; } catch (x) { return false; } };
+  const shadowRoots = () => {
+    const acc = [];
+    const walk = (root) => { try { root.querySelectorAll("*").forEach((el) => { if (el.shadowRoot) { acc.push(el.shadowRoot); walk(el.shadowRoot); } }); } catch (e) { /* 忽略 */ } };
+    walk(document);
+    return acc;
+  };
+  const deepAll = (sel) => {
+    const out = [];
+    try { document.querySelectorAll(sel).forEach((e) => out.push(e)); } catch (e) { /* 忽略 */ }
+    shadowRoots().forEach((r) => { try { r.querySelectorAll(sel).forEach((e) => out.push(e)); } catch (e) { /* 忽略 */ } });
+    return out;
+  };
+  // v3.3.5：不再额外 dispatch 合成 click——原来「合成 click + host.click()」会把页面
+  // 点击 handler 触发两次（1688 导出场景实证：一次点击创建两个导出任务 → 下载两份
+  // 相同清单，Downloads 里 26779115/26779116 两个连续任务 ID 同秒创建）。
+  // 保留 pointer/mouse 按下抬起序列维持按压态，click 只由 host.click() 派发一次。
+  const clickEl = (el) => {
+    const host = (el.closest && (el.closest("button,a,[role=button]")) || el);
+    try { ["pointerdown", "mousedown", "mouseup"].forEach((t) => host.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window }))); } catch (e) { /* 忽略 */ }
+    try { host.click(); } catch (e) { /* 忽略 */ }
+    return TXT(host) || TXT(el);
+  };
+  const nodesContaining = (kw) => {
+    const out = [];
+    const seen = [];
+    [document].concat(shadowRoots()).forEach((r) => {
+      try {
+        const tw = document.createTreeWalker(r, NodeFilter.SHOW_TEXT, null, false);
+        let n;
+        while ((n = tw.nextNode())) {
+          if (String(n.nodeValue || "").indexOf(kw) === -1) continue;
+          const p = n.parentElement;
+          if (!p) continue;
+          if (/^(SCRIPT|STYLE|TEMPLATE|NOSCRIPT|HEAD)$/.test(String(p.tagName || "").toUpperCase())) continue;
+          if (seen.indexOf(p) === -1) { seen.push(p); out.push(p); }
+        }
+      } catch (e) { /* 忽略 */ }
+    });
+    return out;
+  };
+  const elevate = (el) => {
+    let cur = el;
+    let firstVisible = null;
+    for (let i = 0; i < 5 && cur; i++) {
+      const tag = String(cur.tagName || "").toLowerCase();
+      const role = cur.getAttribute ? cur.getAttribute("role") : "";
+      if (tag === "button" || tag === "a" || role === "button") return cur;
+      const t = TXT(cur).trim();
+      if (visible(cur) && t && t.length <= 40 && !firstVisible) firstVisible = cur;
+      cur = cur.parentElement || (cur.getRootNode && cur.getRootNode().host) || null;
+    }
+    return firstVisible || el;
+  };
+  const btnsFromText = (kws) => {
+    const seen = [];
+    const out = [];
+    kws.forEach((kw) => nodesContaining(kw).forEach((p) => {
+      const el = elevate(p);
+      if (seen.indexOf(el) !== -1) return;
+      seen.push(el);
+      const t = TXT(el).trim();
+      if (t && t.length <= 30) out.push({ e: el, t: t });
+    }));
+    return out;
+  };
+  const findExportBtn = (exactRe) => {
+    const hits = [];
+    nodesContaining("导出").forEach((p) => {
+      const el = elevate(p);
+      const t = TXT(el).trim();
+      if (!t || t.length > 40) return;
+      if (hits.some((h) => h.e === el)) return;
+      hits.push({ e: el, t: t });
+    });
+    if (!hits.length) return { hits: [], pick: null };
+    const exact = hits.filter((h) => exactRe.test(h.t)).sort((a, b) => a.t.length - b.t.length);
+    const vis = (exact.length ? exact : hits).filter((h) => visible(h.e));
+    return { hits: hits, pick: vis[0] || exact[0] || hits[0] || null };
+  };
+  const isDisabled = (e) => {
+    if (!e) return false;
+    if (e.disabled === true) return true;
+    if (e.getAttribute("disabled") !== null || e.getAttribute("aria-disabled") === "true") return true;
+    // 阿里 Fusion 组件的禁用态是类名（如 next-btn-disabled / btn-disabled），不是 disabled 属性
+    if (/disabled/i.test(String(e.className || ""))) {
+      // v3.3.3：部分组件会在亮按钮上残留 disabled 样式类——计算样式 cursor=pointer 的一定是可点亮按钮
+      try { if (window.getComputedStyle && window.getComputedStyle(e).cursor === "pointer") return false; } catch (x) { /* 忽略 */ }
+      return true;
+    }
+    return false;
+  };
+  // 勾选数统计（v3.3.1 重写）：1688 买家工作台用阿里 Fusion 自定义勾选框——
+  // 真 input 是视觉隐藏的（width>0 判定会漏），勾选态挂在外壳类名 next-checkbox-checked 上。
+  // 所以：① input[type=checkbox]:checked 直接用 :checked 伪类（不过滤可见性）；
+  //       ② [role=checkbox][aria-checked=true]；③ 类名含 checkbox 且含 checked 的外壳元素。
+  // 外壳与 input 双计问题：外壳若内部包含已勾选 input 则跳过（由 input 代表）。
+  const countChecked = () => {
+    let n = 0;
+    const seen = [];
+    const add = (el) => {
+      if (!el || seen.indexOf(el) !== -1) return;
+      let hasChk = false;
+      try { hasChk = !!el.querySelector('input[type=checkbox]:checked'); } catch (e) { /* 忽略 */ }
+      if (hasChk) return; // 外壳元素，由其内部的 input 代表，避免双计
+      seen.push(el); n++;
+    };
+    [document].concat(shadowRoots()).forEach((r) => {
+      try { r.querySelectorAll('input[type=checkbox]:checked').forEach(add); } catch (e) { /* 忽略 */ }
+      try { r.querySelectorAll('[role=checkbox]').forEach((el) => { if (el.getAttribute("aria-checked") === "true") add(el); }); } catch (e) { /* 忽略 */ }
+      try {
+        r.querySelectorAll('[class*="checkbox"]').forEach((el) => {
+          if (/(^|[\s-])checked([\s-$]|$)/i.test(String(el.className || ""))) add(el);
+        });
+      } catch (e) { /* 忽略 */ }
+    });
+    return n;
+  };
+  const RE_SEL = /导出所选订单|导出选中订单|导出所选|导出选中/;
+  const RE_COND = /导出当前条件|导出全部符合条件|导出符合当前条件|按当前条件导出|全部导出|导出筛选结果/;
+  // 勾选/按钮状态探测（v3.3.1）：mode="selected"|"condition"，返回该模式下导出按钮的实际状态。
+  // 1688 页面按钮亮 = 有勾选（按钮状态最权威）；勾选数只作展示与兜底。
+  window.__IH_PAGE_SEL = function (mode) {
+    mode = mode === "condition" ? "condition" : "selected";
+    const RE = mode === "condition" ? RE_COND : RE_SEL;
+    const r = findExportBtn(RE);
+    // v3.3.3：合并「所有」exact 可见候选的亮灰态——任一亮即算可用。
+    // 之前只看 pick（第一个命中元素），买家工作台工具栏结构不同很容易挑错元素/误判为灰。
+    let anyEnabled = false, anyDisabled = false, exactVis = 0;
+    (r.hits || []).forEach((h) => {
+      if (!RE.test(h.t) || !visible(h.e)) return;
+      exactVis++;
+      if (isDisabled(h.e)) anyDisabled = true; else anyEnabled = true;
+    });
+    return {
+      mode: mode,
+      checked: countChecked(),
+      btnFound: !!r.pick,
+      btnDisabled: r.pick ? isDisabled(r.pick.e) : null,
+      anyEnabled: anyEnabled,
+      anyDisabled: anyDisabled,
+      exactVis: exactVis,
+      hitCount: (r.hits || []).length,
+      btnText: r.pick ? r.pick.t : null,
+      frame: location.href.slice(0, 100),
+    };
+  };
+  window.__IH_PAGE_EXPORT = async function (mode, skipCheck) {
+    const out = { mode: mode, ok: false, frame: location.href.slice(0, 120), log: [] };
+    const L2 = (m) => out.log.push(String(m));
+    if (/xdomain-storage/i.test(location.href)) { out.err = "bridge-frame"; return out; }
+    const isCond = mode === "condition";
+    const RE = isCond ? RE_COND : RE_SEL;
+    // v3.3.5 判定权上收：弹窗侧已经用 __IH_PAGE_SEL 逐帧探测并 fail-open 放行后才调用本函数，
+    // 页面侧不再做第二套校验——两套逻辑各判各的，页面工具栏重渲染的瞬间必然分叉
+    // （v3.3.1~v3.3.4 四连「请先在1688选择要导出的订单」事故的共同根因）。
+    // skipCheck=1（popup 固定传）：直接选最佳候选点击，绝不拦截；点错灰按钮=无害 no-op。
+    const r = findExportBtn(RE);
+    if (!r.pick) { out.err = "btn-not-found"; L2("⚠ 未找到导出按钮（候选 " + r.hits.length + " 个含「导出」元素）"); return out; }
+    // 候选优先级：exact+可见+亮 > exact+可见 > exact——同文案置灰副本场景自动挑亮的那个
+    const exactHits = (r.hits || []).filter((h) => RE.test(h.t));
+    const visHits = exactHits.filter((h) => visible(h.e));
+    const enabledHits = visHits.filter((h) => !isDisabled(h.e));
+    const target = enabledHits[0] || visHits[0] || exactHits[0] || r.pick;
+    L2("候选 exact " + exactHits.length + " / 可见 " + visHits.length + " / 亮 " + enabledHits.length + "，勾选 " + countChecked() + " 项 → 点击「" + target.t + "」" + (isDisabled(target.e) ? "（疑似置灰，仍尝试）" : "（亮）"));
+    if (!skipCheck) {
+      // 仅在未传 skipCheck（非弹窗调用/调试）时保留兜底校验
+      if (!isCond && !enabledHits.length && countChecked() === 0) {
+        out.err = "no-selection";
+        L2("⚠ 未检测到亮着的「导出所选订单」且勾选数为 0。「导出所选订单」只能导出当前页勾选的订单（不支持跨页选择）——请先在 1688 买家工作台全选或点选要导出的订单");
+        return out;
+      }
+      if (isCond && !visHits.length) {
+        out.err = "btn-disabled";
+        L2("⚠「" + target.t + "」按钮当前不可见或是灰的（可能订单还在加载），稍等几秒重试");
+        return out;
+      }
+    }
+    const netBefore = (window.__IH_NET || []).length;
+    const exportBefore = window.__IH_EXPORT || null;
+    const clickT = Date.now();
+    clickEl(target.e);
+    L2("已点击「" + target.t + "」");
+    // 等待并观察：本次点击是否已直接触发导出（下载/导出接口提交）。
+    // 三路信号判定（v3.3.2 修复重复下载）：① 网络捕获条目增加；② 最近导出提交对象变化；③ xlsx 响应晚于点击。
+    await sleep(2200);
+    const netAfter = (window.__IH_NET || []).length;
+    const xlsxAfter = window.__IH_XLSX ? window.__IH_XLSX.t : 0;
+    const fired = netAfter > netBefore || window.__IH_EXPORT !== exportBefore || xlsxAfter > clickT;
+    // 「生成新报表」弹窗仅当「点击主按钮未触发导出」时才点一次；否则与主按钮重复触发 → 下载两份相同清单。
+    // v3.3.5：必须过滤 visible——页面 DOM 里有预渲染但隐藏的「生成新报表」弹窗模板，
+    // 点隐藏按钮会凭空创建第二个导出任务（双份清单帮凶之一）；弹窗没真正弹出就不补点。
+    const gen = btnsFromText(["生成新报表"]).filter((g) => visible(g.e))[0] || null;
+    if (gen && !fired) {
+      clickEl(gen.e);
+      L2("弹窗已点「生成新报表」（点击「" + target.t + "」未直接触发下载，由生成新报表发起导出）");
+      out.dialog = true;
+    } else if (gen && fired) {
+      L2("「生成新报表」弹窗出现，但点击「" + target.t + "」已触发导出，为避免重复下载不再点「生成新报表」");
+    } else if (!gen) {
+      const c = btnsFromText(["确定", "确认导出", "继续导出", "立即导出"]).filter((x) => visible(x.e)).sort((a, b) => a.t.length - b.t.length)[0];
+      if (c && !fired) { clickEl(c.e); L2("已点确认「" + c.t + "」"); }
+    }
+    out.ok = true;
+    return out;
+  };
+})();
+
+if (typeof window !== "undefined") {
+  window.__IH_PAGE = window.__IH_PAGE || {};
+  window.__IH_PAGE.diagnose1688 = diagnose1688;
+  window.__IH_PAGE.grab1688 = grab1688;
+  window.__IH_PAGE.ver = "3.3.5";
+  window.__IH_PAGE_VER = "3.3.5";
+  // 脚本注入即武装网络探针：用户后续在页面上的任何导出都会被捕获，无需先点诊断
+  try { installNetHook1688(); } catch (e) { /* 忽略 */ }
 }

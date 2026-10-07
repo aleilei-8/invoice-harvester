@@ -7,3 +7,7 @@ __pycache__/
 .DS_Store
 Thumbs.db
 .pdd_config.json
+
+# 用户本地匹配结果（含真实订单数据，不入库）
+1688_拼多多_匹配结果*.xlsx
+*_匹配结果*.xlsx

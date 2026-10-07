@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>1688 × 拼多多 开票工作台</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: "Microsoft YaHei", system-ui, sans-serif; background: #f4f6fa; color: #1f2937; padding: 24px; }
+    .wrap { max-width: 860px; margin: 0 auto; }
+    h1 { font-size: 20px; margin-bottom: 6px; color: #1e3a8a; }
+    .sub { color: #6b7280; font-size: 13px; margin-bottom: 14px; line-height: 1.8; }
+    .flow { background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 10px; padding: 12px 16px; font-size: 13px; margin-bottom: 14px; color: #1e40af; line-height: 1.9; }
+    .flow b { color: #1d4ed8; }
+    .card { background: #fff; border: 1px solid #e5e7eb; border-radius: 10px; padding: 18px; margin-bottom: 14px; }
+    .drop { border: 2px dashed #93c5fd; border-radius: 10px; padding: 26px; text-align: center; color: #4b5563; cursor: pointer; transition: all .15s; }
+    .drop:hover, .drop.over { background: #eff6ff; border-color: #2563eb; }
+    .drop b { color: #2563eb; }
+    .files { margin-top: 12px; display: flex; flex-direction: column; gap: 8px; }
+    .file-chip { display: flex; align-items: center; gap: 10px; background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; padding: 8px 12px; font-size: 13px; }
+    .tag { font-size: 11px; padding: 2px 8px; border-radius: 99px; font-weight: 600; }
+    .tag-1688 { background: #fef3c7; color: #92400e; }
+    .tag-pdd { background: #fce7f3; color: #9d174d; }
+    .tag-unk { background: #e5e7eb; color: #4b5563; }
+    .tag-ok { background: #d1fae5; color: #065f46; }
+    .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    button.btn { padding: 9px 20px; border: 0; border-radius: 8px; font-size: 14px; cursor: pointer; font-weight: 600; }
+    .btn-primary { background: #2563eb; color: #fff; }
+    .btn-primary:disabled { background: #9ca3af; cursor: not-allowed; }
+    .btn-ghost { background: #eef2ff; color: #3730a3; }
+    #log { background: #0f172a; color: #d1d5db; border-radius: 10px; padding: 14px; font-family: Consolas, monospace; font-size: 12px; max-height: 260px; overflow-y: auto; white-space: pre-wrap; }
+    .ok { color: #6ee7b7; } .err { color: #fca5a5; } .warn { color: #fcd34d; } .info { color: #93c5fd; }
+    .counts { display: flex; gap: 14px; margin: 10px 0; font-size: 13px; }
+    .counts b { color: #2563eb; }
+    h2 { font-size: 15px; margin-bottom: 10px; color: #111827; }
+    .inv-inputs { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 10px; }
+    .inv-inputs label { font-size: 13px; color: #374151; display: flex; align-items: center; gap: 6px; }
+    .inv-inputs input { padding: 7px 10px; border: 1px solid #d1d5db; border-radius: 8px; font-size: 13px; width: 240px; }
+    .inv-inputs input:focus { outline: 2px solid #bfdbfe; border-color: #2563eb; }
+    .tip { font-size: 12px; color: #6b7280; margin-top: 6px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>1688 × 拼多多 开票工作台</h1>
+    <div class="sub">按「快递单号」匹配 1688 与拼多多订单（并校验两边快递公司是否一致），生成可直接发给 1688 卖家的开票清单。全部在本机处理，不上传任何服务器。</div>
+    <div class="flow">
+      <b>代发开票流程：</b>
+      ① 1688 订单页筛选条件选<b>「全部」</b>→ 点<b>「导出当前条件」</b>→ 下载的报表被插件自动解析入库（或点下方按钮调入 / 直接上传导出表）<br>
+      ② 上传<b>拼多多订单导出表</b>（买家申请的开票抬头/税号若在表内会自动带入，表内没有就下方手动填）<br>
+      ③ 点<b>「匹配并生成开票清单」</b>→ 把「开票清单_按卖家」发给各 1688 卖家开票<br>
+      ④ 卖家开好票后，把结果文件<b>重新拖回本页</b> → 自动回填开票状态 → 对照「开票跟踪表」逐单上传发票到拼多多
+    </div>
+
+    <div class="card">
+      <h2>① 导入订单文件（可一次多选；历史结果文件拖入即回填状态）</h2>
+      <div class="drop" id="drop">
+        点击选择 或 把文件拖到这里<br />
+        支持 <b>.xlsx / .xls / .csv</b>（1688 导出表、拼多多导出表、往期开票结果文件）
+        <input type="file" id="files" accept=".xlsx,.xls,.csv" multiple hidden />
+      </div>
+      <div class="row" style="margin-top:10px">
+        <button class="btn btn-ghost" id="btn-load-lib">从插件库载入 1688（导出当前条件后自动入库）</button>
+        <button class="btn btn-ghost" id="btn-load-pdd">从插件库载入拼多多（导出后自动入库）</button>
+      </div>
+      <div class="tip">两个平台的后台导出文件一经下载都会被插件自动捕获解析入库——在插件弹窗里看到「1688已解析 / 拼多多已入库」计数后，直接回这里点上面两个按钮即可，无需再上传文件。</div>
+      <div class="files" id="chips"></div>
+      <div class="counts" id="counts"></div>
+    </div>
+
+    <div class="card">
+      <h2>② 开票信息（可选：拼多多表里没有抬头/税号时，填这里，统一写入开票清单）</h2>
+      <div class="inv-inputs">
+        <label>发票抬头 <input type="text" id="inv-title" placeholder="如：XX市XX贸易有限公司" /></label>
+        <label>税号 <input type="text" id="inv-tax" placeholder="纳税人识别号 / 统一社会信用代码" /></label>
+      </div>
+      <div class="tip">若拼多多导出表本身含「发票抬头 / 税号」列，则优先使用表内每单各自的开票信息。</div>
+    </div>
+
+    <div class="card">
+      <h2>③ 匹配并导出</h2>
+      <div class="row">
+        <button class="btn btn-primary" id="btn-go" disabled>匹配并生成开票清单 XLSX</button>
+        <button class="btn btn-ghost" id="btn-reset">清空重来</button>
+        <span style="font-size:12px;color:#6b7280">匹配键：快递/运单号（去空格、忽略大小写）＋ 快递公司一致性校验；输出：匹配结果 / 开票清单_按卖家 / 开票跟踪表 / 未匹配</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>运行日志</h2>
+      <div id="log"></div>
+    </div>
+  </div>
+  <script src="xlsx.full.min.js"></script>
+  <script src="matcher.js"></script>
+</body>
+</html>

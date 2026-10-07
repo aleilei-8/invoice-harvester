@@ -72,6 +72,18 @@ const PLATFORM_PRESETS = {
       buyer: ["收货人", "买家", "收件人", "consignee"],
     },
   },
+  "1688": {
+    name: "1688 采购",
+    mode: "1688",
+    keywords: {
+      order_id: ["订单编号", "订单号", "订单", "单号", "order", "no.", "编号"],
+      seller: ["卖家公司名", "卖家", "供应商", "供货商", "company", "supplier"],
+      tracking_no: ["运单号", "物流单号", "快递单号", "waybill", "物流"],
+      courier: ["物流公司", "快递公司", "承运商", "快递"],
+      amount: ["实付款", "实付金额", "金额", "价税合计", "应付金额", "amount", "price"],
+      items: ["货品标题", "商品", "货品", "item", "product"],
+    },
+  },
 };
 
 const ROLE_LABEL = Object.fromEntries(FIELDS.map((f) => [f.key, f.label]));
@@ -100,6 +112,133 @@ function refreshLibCount() {
     $("lib-count").textContent = `汇总库：${n} 条`;
   });
 }
+
+function refreshA1688Count() {
+  const el = $("a1688-count");
+  if (!el) return;
+  chrome.storage.local.get({ a1688_orders: [] }, (d) => {
+    const n = Array.isArray(d.a1688_orders) ? d.a1688_orders.length : 0;
+    el.textContent = `1688已解析：${n} 条`;
+  });
+}
+
+function refreshPddCount() {
+  const el = $("pdd-count");
+  if (!el) return;
+  chrome.storage.local.get({ pdd_orders: [] }, (d) => {
+    const n = Array.isArray(d.pdd_orders) ? d.pdd_orders.length : 0;
+    el.textContent = `拼多多已入库：${n} 条`;
+  });
+}
+
+// ===== 1688 专区：两种导出（v3.3.1）=====
+// 对应 1688 页面上的两个按钮，各点一次、绝不循环重试（v3.2.0 疯狂下载事故教训）。
+// mode: "selected"（导出所选订单）/ "condition"（导出当前条件）
+// 流程：注入 → 逐帧问询 __IH_PAGE_SEL(mode) 找到**真的有目标按钮**的帧 → args 传参定点点击。
+async function export1688(mode) {
+  const btn = mode === "condition" ? $("btn-exp-cond") : $("btn-exp-sel");
+  const label = mode === "condition" ? "导出当前条件" : "导出所选订单";
+  const tab = await activeTab();
+  if (!tab || !tab.url || !/1688\.com/i.test(tab.url || "")) {
+    $("status").textContent = "请先打开 1688 订单页面";
+    log("「" + label + "」需要在 1688 订单列表页使用（当前标签页不是 1688）", "err");
+    return;
+  }
+  if (btn) btn.disabled = true;
+  $("status").textContent = "1688 " + label + "…";
+  try {
+    await injectAllFrames(tab.id);
+    const cands = ((await probe1688Frames(tab.id)) || []).filter((c) => (c.score || 0) > 0).slice(0, 6);
+    if (!cands.length) {
+      log("未找到 1688 订单帧。请确认：① 当前在 1688「已买到的货品」订单列表页；② 对页面按 F5 后重试。", "err");
+      $("status").textContent = "未找到 1688 订单帧";
+      return;
+    }
+    // 逐帧问询：优先选「亮按钮」所在帧，其次记录第一个含按钮的帧（分值最高的帧不一定含按钮）
+    let target = null;
+    for (const c of cands) {
+      const res = await runFrame(tab.id, c.frameId, (m) => (window.__IH_PAGE_SEL) ? window.__IH_PAGE_SEL(m) : null, [mode]);
+      const arr = Array.isArray(res) ? res : [res];
+      const s = (arr[0] && arr[0].result) || null;
+      if (!s || !s.btnFound) continue;
+      if (!target) target = { frame: c, sel: s };
+      if (s.anyEnabled) { target = { frame: c, sel: s }; break; }
+    }
+    if (!target) {
+      log(`⚠ ${cands.length} 个候选帧里都没有「${label}」按钮。最可能原因：页面脚本还是旧版（对 1688 页按 F5 刷新，弹窗徽标「页面 v」应显示 ${PAGE_VER}）`, "err");
+      $("status").textContent = "未找到导出按钮";
+      return;
+    }
+    log(`已定位「${label}」按钮：${target.frame.url || target.frame.rawUrl}（按钮${target.sel.btnDisabled ? "当前置灰" : "可用"}）`, "ok");
+    // v3.3.5：skipCheck=1 —— 弹窗侧已用 __IH_PAGE_SEL 探测放行（fail-open），
+    // 页面侧不再做第二套校验（两套逻辑分叉是 v3.3.1~3.3.4 四连误拦的根因）。
+    // 点错灰按钮=无害 no-op，代价远小于误拦锁死。
+    const res = await runFrame(tab.id, target.frame.frameId, (m, skip) =>
+      (window.__IH_PAGE_EXPORT) ? window.__IH_PAGE_EXPORT(m, !!skip) : { err: "页面函数未注入，请 F5 后重试" }, [mode, 1]);
+    const arr = Array.isArray(res) ? res : [res];
+    const out = ((arr[0] && arr[0].result) || arr[0] || {});
+    (out.log || []).forEach((l) => log(l, out.ok ? "ok" : "warn"));
+    if (out.err === "no-selection") {
+      $("status").textContent = "请先在1688选择要导出的订单";
+      log("「导出所选订单」只能导出当前页勾选的订单（不支持跨页选择）：请先在 1688 买家工作台全选或点选要导出的订单，再点此按钮", "warn");
+    } else if (out.ok) {
+      $("status").textContent = out.dialog ? "已生成导出任务，报表生成后到导出记录点「下载」（自动入库）" : "导出已触发，下载完成后自动入库";
+      log("✅ 导出已触发。浏览器下载完成后，后台会自动捕获并解析入库（「1688已解析」计数跳增）", "ok");
+    } else if (out.err) {
+      $("status").textContent = "导出失败（见日志）";
+    }
+  } catch (e) {
+    log("导出异常：" + (e && e.message || e), "err");
+    $("status").textContent = "导出异常";
+  } finally {
+    if (btn) btn.disabled = false;
+    refreshA1688Count();
+    setTimeout(refresh1688SelState, 3000);
+  }
+}
+
+// 探测 1688 页面勾选状态 → 未勾选时禁用「导出所选订单」按钮并提示（v3.3.1）
+// 判定优先级：1688 页面「导出所选订单」按钮是否置灰（最权威，与页面按钮同步亮灰）；
+// 按钮没找到时才用勾选数兜底。v3.3.0 的 bug：只数"可见 input[type=checkbox]"，
+// 而 1688 用 Fusion 自定义勾选框（input 视觉隐藏、勾选态在外壳类名上），永远数到 0 → 按钮一直灰。
+async function refresh1688SelState() {
+  const btn = $("btn-exp-sel");
+  if (!btn || $("platform").value !== "1688") return;
+  const tab = await activeTab();
+  if (!tab || !tab.url || !/1688\.com/i.test(tab.url || "")) { btn.disabled = false; btn.title = "对应 1688 页面「导出所选订单」。请先打开 1688 订单列表页"; return; }
+  try {
+    await injectAllFrames(tab.id);
+    const cands = ((await probe1688Frames(tab.id)) || []).filter((c) => (c.score || 0) > 0).slice(0, 6);
+    let s = null;
+    for (const c of cands) {
+      const res = await runFrame(tab.id, c.frameId, (m) => (window.__IH_PAGE_SEL) ? window.__IH_PAGE_SEL(m) : null, ["selected"]);
+      const arr = Array.isArray(res) ? res : [res];
+      const r = (arr[0] && arr[0].result) || null;
+      if (!r || !r.btnFound) continue;
+      if (!s) s = r;
+      if (r.anyEnabled) { s = r; break; } // 优先采纳「亮按钮」所在帧的结果
+    }
+    if (!s) { btn.disabled = false; btn.title = "对应 1688 页面「导出所选订单」（未探测到页面按钮，可直接点击尝试；若无效请 F5 刷新页面）"; return; }
+    // v3.3.3 判定规则（反转）：勾选数>0 **或** 页面按钮亮 → 任一成立即启用；
+    // 两者都否定才置灰。误灰会把用户锁死（v3.3.1/3.3.2 两次事故），误亮则有
+    // __IH_PAGE_EXPORT 的点击前二次校验兜底，代价小得多。
+    const hasSelection = (s.checked || 0) > 0;
+    const pageBtnEnabled = s.anyEnabled === true || (s.btnFound && s.btnDisabled === false);
+    const noSel = !hasSelection && !pageBtnEnabled;
+    btn.disabled = noSel;
+    const stateText = "勾选 " + (s.checked || 0) + " 项 / 页面按钮" + (s.anyEnabled ? "亮" : (s.btnFound ? (s.btnDisabled === true ? "灰" : "态未知") : "未找到"));
+    btn.title = noSel
+      ? "不可用：请先在 1688 买家工作台全选或点选要导出的订单（「导出所选订单」只支持当前页勾选，不支持跨页选择）"
+      : "对应 1688 页面「导出所选订单」：只导出当前页勾选的订单（不支持跨页选择）——" + stateText;
+    // 仅在状态变化时打一条日志（轮询 2.5s 一次，不刷屏），便于用户回报时给出精确定位
+    const sig = noSel + "|" + stateText;
+    if (sig !== refresh1688SelState._last) {
+      refresh1688SelState._last = sig;
+      log("1688 状态探测：" + stateText + (noSel ? " → 导出所选订单置灰（请先在页面勾选订单）" : " → 可点击导出"));
+    }
+  } catch (e) { btn.disabled = false; }
+}
+
 
 // ===== 关键词管理 =====
 function deepClone(o) { return JSON.parse(JSON.stringify(o)); }
@@ -147,7 +286,12 @@ function onPlatformChange() {
   const plat = $("platform").value;
   chrome.storage.local.set({ last_platform: plat });
   const isCustom = plat === "custom";
-  $("kw-bar").hidden = !isCustom;
+  const kwBar = $("kw-bar");
+  if (kwBar) kwBar.hidden = !isCustom;
+  // ★ v3.2.0 功能分区：1688 不支持自动翻页 → 只显示「导出捕获」专区；其他平台显示通用抓取区
+  const is1688 = plat === "1688";
+  if ($("sec-generic")) $("sec-generic").hidden = is1688;
+  if ($("sec-1688")) $("sec-1688").hidden = !is1688;
   if (isCustom) {
     chrome.storage.local.get("custom_keywords", (d) => {
       const kw = d.custom_keywords && typeof d.custom_keywords === "object"
@@ -157,6 +301,7 @@ function onPlatformChange() {
     });
   }
   log(`已切换平台：${plat === "custom" ? "自定义" : PLATFORM_PRESETS[plat].name}`);
+  if (is1688) refresh1688SelState();
 }
 
 function toggleKwEditor() {
@@ -196,6 +341,13 @@ function resetCustomKeywords() {
 
 // ===== 抓取 =====
 function grab() {
+  // ★ v3.2.0：1688 已取消一切自动导出（曾导致反复触发导出/疯狂下载）。
+  //   1688 订单在 Shadow DOM + 跨域子应用里，页面抓表与自动翻页均不可靠 → 只用官方导出 + 被动捕获。
+  if ($("platform") && $("platform").value === "1688") {
+    log("1688 不支持页面抓取/自动翻页。请在 1688 订单页手动操作：筛选条件选「全部」→ 点「导出当前条件」→ 下载完成后自动入库（弹窗「1688已解析」计数跳增）。", "warn");
+    $("status").textContent = "1688：请用页面上的「导出当前条件」";
+    return;
+  }
   $("status").textContent = "正在抓取本页表格…";
   chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
     const tab = tabs && tabs[0];
@@ -236,7 +388,7 @@ function grab() {
 // ===== 抓取全部页（自动翻页）=====
 const MAX_PAGES = 200;
 // 与 pagefuncs.js 里 window.__IH_PAGE.ver 保持一致：用于识别「页面里跑的是不是当前版本」
-const PAGE_VER = "2.9.0";
+const PAGE_VER = "3.3.5";
 let grabbingAll = false;
 
 function injectOnce(tabId, func, args) {
@@ -307,6 +459,15 @@ function markMerged(tabId, n) {
 }
 
 async function grabAll() {
+  const plat = $("platform").value;
+  // ★ v3.2.0：1688 禁用自动导出（v3.0.16 的自动点「生成新报表/下载」会在判定"未入库"时
+  //   反复触发 harvestPastReports + 逐页导出，几分钟内产生几十个重复下载文件）。
+  if (plat === "1688") {
+    log("⚠ 1688 已禁用「抓取全部页」自动导出：实测会反复触发「生成新报表/下载」造成大量重复下载。" +
+      "正确做法：筛选条件选「全部」→ 手动点「导出当前条件」→ 下载的报表自动入库（一次即全量）。", "warn");
+    $("status").textContent = "1688：请手动「导出当前条件」（自动翻页已禁用）";
+    return;
+  }
   if (grabbingAll) { log("已有一次「抓取全部页」在进行中", "warn"); return; }
   const tab = await activeTab();
   if (!tab) {
@@ -624,14 +785,57 @@ function clearLib() {
   });
 }
 
+// ===== 清空 1688 已解析库（旧版本可能留下脏数据，清空后重新抓取）=====
+function clearA1688() {
+  if (!confirm("确定清空插件内已解析的 1688 订单库？\n（旧版本可能把「物流公司」误当归列，建议清空后重新抓取一次）")) return;
+  chrome.storage.local.set({ a1688_orders: [], __ih_parse_log: [] }, () => {
+    refreshA1688Count();
+    log("1688 已解析库已清空。请刷新 1688 订单页 → 重新「抓取全部页」或手动导出下载一次", "warn");
+  });
+}
+
+// ===== 导出 1688 已解析汇总表（自动翻页抓取后「汇总成一个表」的成果）=====
+function exportA1688() {
+  chrome.storage.local.get({ a1688_orders: [] }, (d) => {
+    const lib = Array.isArray(d.a1688_orders) ? d.a1688_orders : [];
+    if (!lib.length) {
+      log("1688 汇总库为空：请先打开 1688 订单页 → 选平台 1688 → 点「抓取全部页」自动翻页", "warn");
+      return;
+    }
+    if (typeof XLSX === "undefined") { log("XLSX 库未加载，无法导出", "err"); return; }
+    const rows = lib.map((r) => ({
+      "1688订单号": r.order_id || "",
+      "卖家/供应商": r.seller || "",
+      "快递公司": r.courier || "",
+      "快递单号": r.tracking_no || "",
+      "金额": r.amount || "",
+      "货品": r.items || "",
+    }));
+    const ws = XLSX.utils.json_to_sheet(rows);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "1688订单汇总");
+    const dt = new Date().toISOString().slice(0, 10);
+    try {
+      XLSX.writeFile(wb, `1688订单汇总_${dt}.xlsx`);
+      log(`✅ 已导出 1688 汇总表（${lib.length} 条）到 XLSX`, "ok");
+    } catch (e) { log("导出失败：" + e.message, "err"); }
+  });
+}
+
 // ===== 诊断：复制本页所有表格的原始表头与首行（适配新平台用）=====
 function copyDiag() {
+  const selPlatform = $("platform").value;
+  // URL 自动识别：只要在 1688 页面，无论下拉选什么都走 1688 专用诊断，
+  // 避免用户忘记切平台导致跑错诊断（之前在 1688 页跑出 PDD 空结构）。
   chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
     const tab = tabs && tabs[0];
     if (!tab || !tab.url || !(tab.url.indexOf("http") === 0)) {
+      if (selPlatform === "1688") return copyDiag1688();
       log("请先打开商家后台页面再诊断", "warn");
       return;
     }
+    if (selPlatform === "1688" || /1688\.com/i.test(tab.url)) return copyDiag1688();
+
     chrome.scripting.executeScript({
       target: { tabId: tab.id },
       func: () => {
@@ -825,6 +1029,184 @@ function copyDiag() {
   });
 }
 
+// 1688 诊断：复用页面内 diagnose1688()（含分页器 / 订单容器 / 运单号是否在行内 / 导出接口网络探针）
+function injectAllFrames(tabId) {
+  return new Promise((resolve) => {
+    chrome.scripting.executeScript({ target: { tabId, allFrames: true }, files: ["pagefuncs.js"] }, () => resolve());
+  });
+}
+function runAllFrames(tabId, func) {
+  return new Promise((resolve) => {
+    chrome.scripting.executeScript({ target: { tabId, allFrames: true }, func }, (res) => resolve(res || []));
+  });
+}
+// 定点在某一个 frame 里执行（拿到真正含导出控件的帧后再执行，避免在跨域桥接帧里空转）。
+// v3.3.1 关键修复：executeScript 的 func 是序列化后注入页面的，**闭包变量不会带过去**——
+// 之前 export1688 在 func 里引用外层 mode 变量，页面里 mode=undefined 直接抛错（点了没反应）。
+// 参数必须走 executeScript 的 args 通道。
+function runFrame(tabId, frameId, func, args) {
+  return new Promise((resolve) => {
+    const opts = { target: { tabId, frameIds: [frameId] }, func };
+    if (args && args.length) opts.args = args;
+    chrome.scripting.executeScript(opts, (res) => resolve(res || []));
+  });
+}
+// 读页面内脚本版本（判断"页面里跑的是不是当前版本"，需 F5 才会更新）
+async function readPageVers(tabId) {
+  try {
+    const res = await runAllFrames(tabId, () => (window.__IH_PAGE && window.__IH_PAGE.ver) || window.__IH_PAGE_VER || null);
+    const vers = (Array.isArray(res) ? res : [res]).map((r) => r && r.result).filter(Boolean);
+    return Array.from(new Set(vers));
+  } catch (e) { return []; }
+}
+// 版本徽标：把「扩展内存里的版本」与「页面内注入脚本的版本」都摊开，
+// 避免再次出现"改了代码但浏览器跑的是旧构建、双方各说各话"的排查黑洞。
+async function renderVersionBadge() {
+  const el = $("hd-ver");
+  if (!el) return;
+  let extVer = "?";
+  try { extVer = chrome.runtime.getManifest().version; } catch (e) { /* 忽略 */ }
+  const tab = await activeTab();
+  let pageVers = [];
+  if (tab) pageVers = await readPageVers(tab.id);
+  const pageOk = pageVers.length > 0;
+  const same = pageOk && pageVers.every((v) => v === extVer);
+  el.innerHTML = `扩展 v${extVer}<br><span class="${same ? "ok" : "bad"}">页面 v${pageOk ? pageVers.join("/") : "未加载"}</span>`;
+  el.title = same
+    ? `扩展与页面脚本都是 v${extVer}，环境正常`
+    : `扩展 v${extVer} / 页面 v${pageOk ? pageVers.join("/") : "未注入"}。不一致请：① edge://extensions 点插件卡片的「重新加载」；② 回到 1688 页按 F5。扩展位若显示旧版本，说明插件从未重新加载过，我改的代码不会生效。`;
+  return { extVer, pageVers, same };
+}
+// 把帧候选逐条打进日志（「未找到订单帧」失败路径共用）
+function logFrameTable(cands) {
+  (cands || []).forEach((c, i) => {
+    log(`#${i + 1} 帧号${c.frameId} 分值=${c.score} 正文=${c.bodyLen || 0}字 ShadowRoot=${c.shadowCount || 0} ${c.isTop ? "[顶层]" : "[子帧]"}`, (c.score || 0) > 0 ? "ok" : "warn");
+    log(`    URL：${c.url || c.rawUrl || "(空)"}`, "info");
+    log(`    标题：${c.title || "(无标题)"}`, "info");
+    log(`    证据：${(c.ev || []).join(" / ") || "(无)"}`, "info");
+    log(`    可见控件：${(c.btns && c.btns.length) ? c.btns.join(" │ ") : "(无任何可点控件文案)"}`, "info");
+  });
+}
+// 1688 订单帧识别（v3.0.12）：**不能靠 URL 正则**——g.alicdn.com/platform/xdomain-storage/frame.html
+// 这类跨域桥接帧的 hash 里 URL 编码携带了 buyer-order-list.html，会被误判成订单帧（其内没有任何控件）。
+// 改为按「DOM 里是否真的有订单导出控件」打分，桥接帧直接判负分。
+function probe1688Frames(tabId) {
+  return runAllFrames(tabId, () => {
+    const T = (e) => ((e.innerText || e.textContent || e.getAttribute("title") || e.getAttribute("aria-label") || e.value || "").toString().replace(/\s+/g, " ").trim());
+    // ★ 穿透 Shadow DOM（v3.0.14）：1688 订单列表把 UI 渲染在 shadow root 里，
+    //   innerText/querySelectorAll 默认读不到 → body 只剩 1 个字符、按钮全空、被误判为「空壳帧」。
+    const roots = (function collect(root, acc) {
+      acc.push(root);
+      try { root.querySelectorAll("*").forEach((el) => { if (el.shadowRoot) collect(el.shadowRoot, acc); }); }
+      catch (e) { /* 忽略 */ }
+      return acc;
+    })(document, []);
+    const shadowCount = roots.length - 1;
+    const deepAll = (sel) => { const out = []; roots.forEach((r) => { try { r.querySelectorAll(sel).forEach((e) => out.push(e)); } catch (e) { /* 忽略 */ } }); return out; };
+    let body = String((document.body && document.body.innerText) || "");
+    roots.forEach((r) => { if (r !== document) { try { body += " " + String(r.textContent || ""); } catch (e) { /* 忽略 */ } } });
+    body = body.replace(/\s+/g, " ");
+    const url = location.href;
+    const isBridge = /xdomain-storage/i.test(url) || /^https?:\/\/g\.alicdn\.com\//i.test(url);
+    let score = 0;
+    const ev = [];
+    // ① 最硬证据：DOM（含 shadow）里真的有导出/订单控件
+    if (/导出所选订单|导出当前条件|导出全部|导出当前页|批量导出/.test(body)) { score += 120; ev.push("导出按钮"); }
+    else if (/导出/.test(body)) { score += 15; ev.push("导出字样"); }
+    if (/全选/.test(body)) { score += 25; ev.push("全选"); }
+    if (/批量付款|待发货|待收货/.test(body)) { score += 15; ev.push("订单工具栏"); }
+    // ② 标题精确命中「已买到的货品」——这是订单列表帧的强特征（桥接帧无标题）
+    if (/已买到的货品/.test(document.title)) { score += 60; ev.push("标题=已买到的货品"); }
+    if (/air\.1688\.com/.test(url) && /(buyer-order-list|trade-order-list)/.test(url)) { score += 50; ev.push("URL=air订单列表"); }
+    if (/待发货|待收货|售后|订单编号|卖家公司名/.test(body)) { score += 15; ev.push("订单字样"); }
+    if (deepAll("input[type=checkbox]").length > 2) { score += 10; ev.push("多选框"); }
+    const t = deepAll("table").length;
+    if (t) { score += 5; ev.push("table*" + t); }
+    if (isBridge) { score -= 1000; ev.push("跨域桥接帧·排除"); }
+    if (shadowCount) { ev.push("ShadowRoot*" + shadowCount); }
+    // 正文过短：只有「穿透 shadow 后依然很短」才扣分（原来是误伤了 shadow 帧）
+    if (body.length < 50 && !shadowCount) { score -= 60; ev.push("正文过短"); }
+    else if (body.length < 50) { score -= 5; ev.push("正文偏短"); }
+    let frameUrl = url;
+    try {
+      const m = url.match(/#%7B|#\{/);
+      if (m) { frameUrl = decodeURIComponent(url.slice(url.indexOf("#") + 1)).slice(0, 160); }
+    } catch (e) { /* 忽略 */ }
+    // 可见按钮/可点元素文案清点（含 shadow）
+    let btns = [];
+    try {
+      btns = deepAll("button,a,[role=button],span,li,label,div")
+        .filter((e) => { try { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; } catch (x) { return false; } })
+        .map(T).filter((t) => t && t.length <= 16)
+        .filter((t, i, a) => a.indexOf(t) === i).slice(0, 40);
+    } catch (e) { /* 忽略 */ }
+    return { score, url: frameUrl.slice(0, 160), rawUrl: url.slice(0, 120), title: document.title, ev, btns, shadowCount, bodyLen: body.length, isTop: window === window.top };
+  }).then((res) => {
+    const list = (Array.isArray(res) ? res : [res]).map((r) => Object.assign({ frameId: r && r.frameId }, (r && r.result) || {}));
+    list.sort((a, b) => (b.score || 0) - (a.score || 0));
+    return list;
+  });
+}
+// 1688 诊断：订单列表极可能在 iframe 子应用里，故向「所有 frame」注入并逐帧上报，
+// 再聚合出「命中的订单帧」与顶层帧（含所有 iframe 的 src），据此定稿自动抓取逻辑。
+function copyDiag1688() {
+  chrome.tabs.query({ active: true, currentWindow: true }, async (tabs) => {
+    const tab = tabs && tabs[0];
+    if (!tab || !tab.url || tab.url.indexOf("http") !== 0) {
+      log("请先打开 1688 订单页面再诊断", "warn");
+      return;
+    }
+    log("正在向所有 iframe 注入诊断（订单列表可能所在的子框架一并覆盖）…", "ok");
+    await injectAllFrames(tab.id);
+    const results = await runAllFrames(tab.id, () =>
+      (window.__IH_PAGE && window.__IH_PAGE.diagnose1688) ? window.__IH_PAGE.diagnose1688() : { err: "diagnose1688 未注入" });
+    const frames = (Array.isArray(results) ? results : [results])
+      .map((r) => (r && r.result) ? r.result : (r || {}))
+      .filter((x) => x && Object.keys(x).length);
+    const topFrame = frames.find((f) => f.isTop) || frames[0] || {};
+    const orderFrame = frames.find((f) => f.hasOrderContent) || null;
+    const of = orderFrame || topFrame;
+    // downloads 优先取诊断时 chrome.downloads 直查结果（最可靠），否则回退后台 storage
+    let downloads = (orderFrame && orderFrame.downloads && orderFrame.downloads.length)
+      ? orderFrame.downloads
+      : (topFrame.downloads && topFrame.downloads.length ? topFrame.downloads : []);
+    if (!downloads.length) {
+      try { const d = await new Promise((res) => chrome.storage.local.get({ __ih_downloads: [] }, (x) => res(x))); downloads = d.__ih_downloads || []; } catch (e) { downloads = []; }
+    }
+    const a1688Count = (orderFrame && orderFrame.a1688Count != null) ? orderFrame.a1688Count
+      : ((topFrame && topFrame.a1688Count != null) ? topFrame.a1688Count : 0);
+    const report = {
+      ts: Date.now(),
+      tabUrl: tab.url,
+      frameCount: frames.length,
+      summary: {
+        orderFrameFound: !!orderFrame,
+        orderFrameUrl: orderFrame ? orderFrame.frameUrl : null,
+        inlineFields: orderFrame ? orderFrame.inlineFields : (topFrame.inlineFields || null),
+        netCapturedCount: of.netCaptured ? of.netCaptured.length : 0,
+        exportApiCaptured: !!(of.exportApi && of.exportApi.url),
+        xlsxCaptured: !!(of.xlsxCaptured && of.xlsxCaptured.url),
+        a1688Parsed: a1688Count,
+      },
+      exportApi: of.exportApi || null,
+      xlsxCaptured: of.xlsxCaptured || null,
+      downloads: downloads,
+      topFrame: topFrame,
+      orderFrame: orderFrame,
+      allFrames: frames,
+    };
+    const text = JSON.stringify(report, null, 2);
+    const done = () => log(orderFrame
+      ? "1688 诊断已复制：已在订单帧 " + orderFrame.frameUrl + " 找到订单内容（含分页器/字段/导出探针）"
+      : "1688 诊断已复制：所有帧均未直接发现订单内容，请看 topFrame.iframes / allFrames 定位列表所在 iframe", "ok");
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done, () => prompt("剪贴板不可用，请手动复制：", text));
+    } else {
+      prompt("请手动复制诊断信息：", text);
+    }
+  });
+}
+
 // ===== 初始化 =====
 document.addEventListener("DOMContentLoaded", () => {
   loadPlatformSelector();
@@ -835,6 +1217,17 @@ document.addEventListener("DOMContentLoaded", () => {
   $("btn-export-xlsx").addEventListener("click", exportXlsx);
   $("btn-diag").addEventListener("click", copyDiag);
   $("btn-clear").addEventListener("click", clearLib);
+  $("btn-export-a1688").addEventListener("click", exportA1688);
+  $("btn-exp-sel").addEventListener("click", () => export1688("selected"));
+  $("btn-exp-cond").addEventListener("click", () => export1688("condition"));
+  $("btn-clear-a1688").addEventListener("click", clearA1688);
+  // 在独立标签页打开匹配工具（popup 里弹文件选择框会关闭 popup 导致 change 事件丢失，标签页则完全稳定）
+  $("btn-match-pdd").addEventListener("click", () => {
+    chrome.tabs.create({ url: chrome.runtime.getURL("matcher.html") });
+  });
+  // 1688 / 拼多多 已解析计数（后台捕获下载后自动解析入库）
+  refreshA1688Count();
+  refreshPddCount();
   $("btn-stop").addEventListener("click", async () => {
     const tab = await activeTab();
     if (!tab) return;
@@ -843,7 +1236,20 @@ document.addEventListener("DOMContentLoaded", () => {
     $("status").textContent = "正在停止…";
   });
   refreshLibCount();
-  log("就绪。选择平台 → 打开对应商家后台发票/订单页 → 点「抓取本页」");
+  log("就绪。1688 → 切到 1688 专区手动「导出当前条件」自动入库；拼多多/其他平台 → 「抓取本页/抓取全部页」或导出文件自动入库；最后点「开票工作台」匹配开票。");
+  // 版本徽标 + 一致性自检（最常见的"改了没生效"根因：扩展没重新加载 / 页面没刷新）
+  (async () => {
+    const v = await renderVersionBadge();
+    if (!v) return;
+    if (!v.pageVers.length) {
+      log(`⚠️ 页面里没有检测到本扩展的脚本（页面侧 v未加载）。请对目标页面按 F5 刷新一次`, "warn");
+    } else if (!v.same) {
+      log(`⚠️ 版本不一致：扩展 v${v.extVer} / 页面 v${v.pageVers.join("/")}——页面里跑的是旧脚本，请按 F5 刷新页面`, "warn");
+    }
+    if (v.extVer !== PAGE_VER) {
+      log(`⚠️ 严重：扩展内存里是 v${v.extVer}，但代码已是 v${PAGE_VER}——说明扩展长时间未「重新加载」，我改的代码一行都没生效。请到 edge://extensions（或 chrome://extensions）点本插件卡片上的「重新加载 ↻」，然后回页面按 F5`, "err");
+    }
+  })();
   // 弹窗重开时探测页面内是否还有任务在跑（弹窗可以关掉，任务在网页里继续）
   (async () => {
     const tab = await activeTab();
@@ -861,4 +1267,10 @@ document.addEventListener("DOMContentLoaded", () => {
       log(`页面内有 ${st.total - st.mergedPage} 页抓取结果尚未入库——点「抓取全部页」补入库`, "warn");
     }
   })();
+  // v3.3.2：1688 平台实时轮询勾选状态——用户在页面勾选/取消勾选后，「导出所选订单」按钮在 ≤2.5s 内自动同步亮灰，
+  // 避免「打开弹窗时探测一次、之后一直是陈旧状态」导致按钮卡在灰色（即使页面按钮已变亮）。
+  const poll1688Sel = () => { if ($("platform") && $("platform").value === "1688") refresh1688SelState(); };
+  window.__ih1688Timer = setInterval(poll1688Sel, 2500);
+  window.addEventListener("focus", poll1688Sel);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) poll1688Sel(); });
 });
