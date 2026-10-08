@@ -175,6 +175,9 @@ pdd-invoice-grabber/
 ├── background.js          # 后台：chrome.downloads 被动捕获 xlsx → 按 host 路由解析入库（1688 库 / 拼多多库）
 ├── matcher.html           # 开票匹配工作台（独立页面，双键 JOIN 1688↔拼多多）
 ├── matcher.js             # 工作台逻辑：列角色识别 + 运单号归一 + 按卖家小计 + 开票跟踪回填
+├── dropship_draft.js      # 代发采购草稿核心纯逻辑（虚拟号/收货信息解析、规格归一、1688 搜索 URL、利润差、草稿卡片），浏览器+Node 共用、可单测
+├── dropship_panel.html    # 代发采购草稿工作台（独立页面：扫描 PDD 订单 → 生成 1688 采购草稿）
+├── dropship_panel.js      # 工作台逻辑：扫描活动 PDD 标签 → 注入探测 → 渲染草稿卡片（不自动付款/提交/发货）
 ├── 使用说明.txt           # 面向卖家的极简上手说明（替代弹窗长文）
 ├── invoice_aggregator.py  # 配套 Python 汇总器（多源合并 → xlsx）
 ├── build_zip.py           # 分发打包脚本（生成可分享 zip，含 README 与使用说明）

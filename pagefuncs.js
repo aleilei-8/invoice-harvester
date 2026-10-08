@@ -2324,6 +2324,68 @@ async function grab1688(opts) {
       frame: location.href.slice(0, 100),
     };
   };
+  // === 代发：PDD 订单列表/详情页探测（Stage 1 新增）===
+  // 扫描当前文档，定位「收货信息」区块，抽取订单（姓名/虚拟号/地址）+ 商品/规格。
+  // 复用策略：从含「复制完整信息 / 手机号 / 收货人」的锚点向上爬到订单卡片根。
+  // 纯 DOM 操作，不依赖外部闭包变量，可被 chrome.scripting.executeScript 注入后单独调用。
+  window.__IH_PDD_ORDERS = function () {
+    const out = { ok: false, frame: location.href.slice(0, 120), orders: [], errors: [] };
+    try {
+      // 锚点：含「收货信息 / 手机号 / 复制完整信息」的文本节点所在元素
+      const anchors = Array.from(document.querySelectorAll("*")).filter((el) => {
+        const t = (el.innerText || el.textContent || "").replace(/\s+/g, " ");
+        return /(复制完整信息|手机号|收货人|联系地址)/.test(t) && el.children.length <= 3;
+      });
+      const seen = new Set();
+      anchors.forEach((a) => {
+        // 向上爬：找到第一个「含多个『复制』按钮或商品块」的祖先作为订单卡片
+        let root = a;
+        for (let i = 0; i < 12; i++) {
+          if (!root || !root.parentElement) break;
+          const copyCount = root.parentElement.querySelectorAll('[class*="copy" i], [class*="复制" i]').length;
+          const orderIdLike = /(?:订单号|货号|单号)\s*[:：]?\s*(\d{10,})/.test((root.parentElement.innerText || ""));
+          if (copyCount >= 2 || orderIdLike) { root = root.parentElement; break; }
+          root = root.parentElement;
+        }
+        const key = root ? root.innerText.replace(/\s+/g, " ").slice(0, 80) : null;
+        if (!key || seen.has(key)) return;
+        seen.add(key);
+        const txt = (root ? root.innerText : a.innerText || "").replace(/\s+/g, " ").trim();
+        // 订单号（长数字，10 位以上）
+        const oid = (txt.match(/(?:订单号|货号|单号)\s*[:：]?\s*(\d{10,})/) || [])[1] || null;
+        // 商品标题（含「商品 / 宝贝」标签的区块）
+        const itemM = txt.match(/(?:商品|宝贝)[：:\s]*([^\n]+?)(?=\s*(?:规格|颜色|尺码|数量|单价))/);
+        const item = itemM ? itemM[1].trim() : null;
+        // 规格（颜色/尺码）
+        const specM = txt.match(/(?:规格|颜色|尺码|型号)[：:\s]*([^\n]+?)(?=\s*(?:数量|单价|实付|金额))/);
+        const spec = specM ? specM[1].trim() : null;
+        // 数量
+        const qtyM = txt.match(/数量[：:\s]*(\d+)/);
+        const qty = qtyM ? Number(qtyM[1]) : null;
+        // 实付金额
+        const paidM = txt.match(/(?:实付|实收|成交金额|金额)[¥￥：:\s]*([\d.]+)/);
+        const pddPaid = paidM ? Number(paidM[1]) : null;
+
+        // 收货信息子块（优先用「收货信息」标签后的内容）
+        let recipientText = txt;
+        const recM = txt.match(/收货信息[：:\s]*([\s\S]*?)(?=备注|买家留言|订单备注|$)/);
+        if (recM) recipientText = recM[1].trim();
+
+        out.orders.push({
+          orderId: oid,
+          item: item,
+          spec: spec,
+          qty: qty,
+          pddPaid: pddPaid,
+          recipientText: recipientText,
+        });
+      });
+      out.ok = true;
+    } catch (e) {
+      out.errors.push(String(e && e.message || e));
+    }
+    return out;
+  };
   window.__IH_PAGE_EXPORT = async function (mode, skipCheck) {
     const out = { mode: mode, ok: false, frame: location.href.slice(0, 120), log: [] };
     const L2 = (m) => out.log.push(String(m));
@@ -2389,8 +2451,9 @@ if (typeof window !== "undefined") {
   window.__IH_PAGE = window.__IH_PAGE || {};
   window.__IH_PAGE.diagnose1688 = diagnose1688;
   window.__IH_PAGE.grab1688 = grab1688;
-  window.__IH_PAGE.ver = "3.3.5";
-  window.__IH_PAGE_VER = "3.3.5";
+  window.__IH_PAGE.pddOrders = window.__IH_PDD_ORDERS;
+  window.__IH_PAGE.ver = "3.3.6";
+  window.__IH_PAGE_VER = "3.3.6";
   // 脚本注入即武装网络探针：用户后续在页面上的任何导出都会被捕获，无需先点诊断
   try { installNetHook1688(); } catch (e) { /* 忽略 */ }
 }

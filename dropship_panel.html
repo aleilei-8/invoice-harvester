@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>代发采购草稿工作台</title>
+  <style>
+    body { font-family: -apple-system, "Microsoft YaHei", sans-serif; margin: 0; padding: 14px; color: #1f2933; background: #f5f7fa; }
+    h1 { font-size: 16px; margin: 0 0 6px; color: #1668dc; }
+    .hint { font-size: 12px; color: #66707a; margin-bottom: 10px; line-height: 1.5; }
+    .bar { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+    button { background: #1668dc; color: #fff; border: none; padding: 7px 12px; border-radius: 6px; font-size: 13px; cursor: pointer; }
+    button.ghost { background: #e6effb; color: #1668dc; }
+    textarea { width: 100%; height: 60px; box-sizing: border-box; font-size: 12px; padding: 6px; border: 1px solid #cfd8e3; border-radius: 6px; }
+    .card { background: #fff; border: 1px solid #e4e9f0; border-radius: 8px; padding: 12px; margin-bottom: 10px; box-shadow: 0 1px 2px rgba(0,0,0,.04); }
+    .card.warn { border-color: #ffb74d; background: #fff8ef; }
+    .row { display: flex; justify-content: space-between; font-size: 13px; margin: 3px 0; }
+    .k { color: #66707a; } .v { color: #1f2933; font-weight: 600; }
+    .tag { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 4px; margin-left: 6px; }
+    .tag.ok { background: #e6f7ec; color: #18884a; }
+    .tag.bad { background: #fde8e8; color: #c0392b; }
+    a.act { color: #1668dc; font-size: 13px; text-decoration: none; margin-top: 6px; display: inline-block; }
+    .empty { color: #9aa5b1; font-size: 13px; text-align: center; padding: 30px 0; }
+  </style>
+</head>
+<body>
+  <h1>代发采购草稿工作台</h1>
+  <div class="hint">
+    ① 在拼多多商家后台打开「待发货」订单列表页 → ② 点「扫描订单」自动抽取收货信息（含隐私号+分机）→ ③ 点「去1688采购」跳转搜同款。<br/>
+    <b>不自动付款、不自动提交、不自动发货</b>，仅生成草稿，人工确认。
+  </div>
+  <div class="bar">
+    <button id="scan">扫描当前 PDD 订单页</button>
+    <button id="scanManual" class="ghost">用粘贴的文本解析</button>
+    <button id="clear" class="ghost">清空</button>
+  </div>
+  <textarea id="paste" placeholder="备用：把订单「收货信息」区文本粘贴到这里，再点「用粘贴的文本解析」"></textarea>
+  <div id="list"><div class="empty">尚未扫描。请先在拼多多后台打开订单列表页。</div></div>
+
+  <script src="dropship_draft.js"></script>
+  <script src="dropship_panel.js"></script>
+</body>
+</html>

@@ -388,7 +388,7 @@ function grab() {
 // ===== 抓取全部页（自动翻页）=====
 const MAX_PAGES = 200;
 // 与 pagefuncs.js 里 window.__IH_PAGE.ver 保持一致：用于识别「页面里跑的是不是当前版本」
-const PAGE_VER = "3.3.5";
+const PAGE_VER = "3.3.6";
 let grabbingAll = false;
 
 function injectOnce(tabId, func, args) {
@@ -1224,6 +1224,10 @@ document.addEventListener("DOMContentLoaded", () => {
   // 在独立标签页打开匹配工具（popup 里弹文件选择框会关闭 popup 导致 change 事件丢失，标签页则完全稳定）
   $("btn-match-pdd").addEventListener("click", () => {
     chrome.tabs.create({ url: chrome.runtime.getURL("matcher.html") });
+  });
+  // 代发采购草稿（Stage 1）：打开独立工作台页
+  $("btn-dropship").addEventListener("click", () => {
+    chrome.tabs.create({ url: chrome.runtime.getURL("dropship_panel.html") });
   });
   // 1688 / 拼多多 已解析计数（后台捕获下载后自动解析入库）
   refreshA1688Count();

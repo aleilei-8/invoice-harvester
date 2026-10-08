@@ -25,6 +25,9 @@ INCLUDE = [
     "matcher.html",
     "matcher.js",
     "background.js",
+    "dropship_draft.js",
+    "dropship_panel.html",
+    "dropship_panel.js",
 ]
 
 # 需要排除的目录 / 后缀（即便在扩展目录内也不打包）

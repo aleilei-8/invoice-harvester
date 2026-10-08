@@ -51,6 +51,11 @@
     <button id="btn-match-pdd" class="btn btn-primary" style="width:100%" title="打开开票工作台：按快递单号匹配 1688 与拼多多订单（含快递公司一致性校验），生成按卖家分组开票清单 + 开票跟踪表，支持往期结果文件拖回回填开票状态">开票工作台（匹配 1688 × 拼多多 → 开票清单）</button>
   </section>
 
+  <!-- ═══ 全局：代发采购草稿入口（Stage 1）═══ -->
+  <section class="toolbar">
+    <button id="btn-dropship" class="btn btn-primary" style="width:100%" title="打开代发采购草稿工作台：扫描 PDD 订单列表，抽取收货信息（含隐私号+分机），生成 1688 采购草稿。不自动付款、不自动提交、不自动发货。">代发采购草稿（PDD 订单 → 1688 采购草稿）</button>
+  </section>
+
   <div id="kw-editor" class="kw-editor" hidden>
     <div class="kw-tip">自定义模式：修改下方 JSON（角色 → 关键词数组）后点「保存」。最长命中关键词优先，可加英文别名（如 tax / order / tracking）。</div>
     <textarea id="kw-edit" class="kw-text" spellcheck="false"></textarea>
