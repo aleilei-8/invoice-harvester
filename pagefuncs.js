@@ -2386,6 +2386,161 @@ async function grab1688(opts) {
     }
     return out;
   };
+
+  // ===== 代发：1688 搜同款自动打开 + 填收货（P0-2，v3.3.7） =====
+  // 设计：面板在 1688 新标签打开搜索 URL 时，经 chrome.storage.session 写入 dsTask；
+  // 1688 各页面 content script 加载后由 setTimeout 触发 __IH_DS_AUTO()，按当前 URL 阶段执行：
+  //   search  → 等结果渲染，点第一个商品（__IH_1688_OPEN_FIRST）
+  //   detail  → 选默认规格，点「立即下单/发起订单」（__IH_1688_BUY）
+  //   confirm → 填收货地址（__IH_1688_FILL，核心）
+  // 所有步骤 fail-open + 全程日志（window.__IH_DS_LOG 与 storage.dsTask.log），便于实测精修。
+  const DS = (function () {
+    const logArr = () => { try { return (window.__IH_DS_LOG = window.__IH_DS_LOG || []); } catch (e) { return null; } };
+    const L = (m, kind) => { try { const a = logArr(); if (a) a.push((kind || "log") + ": " + m); } catch (e) {} };
+    const TXT = (e) => ((e && (e.innerText || e.textContent || (e.getAttribute && e.getAttribute("title")) || (e.getAttribute && e.getAttribute("aria-label")) || e.value)) || "").toString().replace(/\s+/g, " ").trim();
+    const visible = (e) => { try { if (!e) return false; const r = e.getBoundingClientRect(); if (!r || r.width <= 0 || r.height <= 0) return false; const cs = getComputedStyle(e); return cs.visibility !== "hidden" && cs.display !== "none"; } catch (x) { return false; } };
+    const shadowRoots = () => { const acc = []; const walk = (root) => { try { root.querySelectorAll("*").forEach((el) => { if (el.shadowRoot) { acc.push(el.shadowRoot); walk(el.shadowRoot); } }); } catch (e) {} }; walk(document); return acc; };
+    const deepAll = (sel) => { const out = []; try { document.querySelectorAll(sel).forEach((e) => out.push(e)); } catch (e) {} shadowRoots().forEach((r) => { try { r.querySelectorAll(sel).forEach((e) => out.push(e)); } catch (e) {} }); return out; };
+    const nodesContaining = (kw) => { const out = []; const seen = []; [document].concat(shadowRoots()).forEach((r) => { try { const tw = document.createTreeWalker(r, NodeFilter.SHOW_TEXT, null, false); let n; while ((n = tw.nextNode())) { if (String(n.nodeValue || "").indexOf(kw) === -1) continue; const p = n.parentElement; if (!p) continue; if (/^(SCRIPT|STYLE|TEMPLATE|NOSCRIPT|HEAD)$/.test(String(p.tagName || "").toUpperCase())) continue; if (seen.indexOf(p) === -1) { seen.push(p); out.push(p); } } } catch (e) {} }); return out; };
+    const elevate = (el) => { let cur = el; let firstVisible = null; for (let i = 0; i < 6 && cur; i++) { const tag = String(cur.tagName || "").toLowerCase(); const role = cur.getAttribute ? cur.getAttribute("role") : ""; if (tag === "button" || tag === "a" || role === "button") return cur; const t = TXT(cur).trim(); if (visible(cur) && t && t.length <= 40 && !firstVisible) firstVisible = cur; cur = cur.parentElement || (cur.getRootNode && cur.getRootNode().host) || null; } return firstVisible || el; };
+    // v3.3.5 单次 click 原则：仅派发一次 host.click()，附带 pointer/mouse 系列维持按压态
+    const clickEl = (el) => { const host = (el.closest && el.closest("button,a,[role=button]")) || el; try { ["pointerdown", "mousedown", "mouseup"].forEach((t) => host.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window }))); } catch (e) {} try { host.click(); } catch (e) {} return TXT(host) || TXT(el); };
+    const isDisabled = (e) => { if (!e) return false; if (e.disabled === true) return true; if (e.getAttribute("disabled") !== null || e.getAttribute("aria-disabled") === "true") return true; if (/disabled/i.test(String(e.className || ""))) { try { if (window.getComputedStyle && window.getComputedStyle(e).cursor === "pointer") return false; } catch (x) {} return true; } return false; };
+    // React/Vue/Fusion 受控输入设值：用原生 setter + 派发 input/change 事件
+    const setInput = (el, value) => {
+      if (!el) return false;
+      try {
+        const proto = el.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+        const setter = Object.getOwnPropertyDescriptor(proto, "value").set;
+        setter.call(el, value == null ? "" : String(value));
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+        el.dispatchEvent(new Event("change", { bubbles: true }));
+        return true;
+      } catch (e) { L("setInput 失败: " + (e && e.message || e), "err"); return false; }
+    };
+    // 按标签文案定位「标签+控件」对：在含 labelKw 的文本节点附近找 input/textarea
+    const fieldByLabel = (labelKw) => {
+      const anchors = nodesContaining(labelKw);
+      for (const a of anchors) {
+        let scope = a.parentElement || a;
+        for (let i = 0; i < 5 && scope; i++) {
+          const inp = scope.querySelector && scope.querySelector("input,textarea");
+          if (inp) return inp;
+          scope = scope.nextElementSibling || scope.parentElement;
+        }
+      }
+      return null;
+    };
+    const btnByText = (kws) => {
+      const out = [];
+      kws.forEach((kw) => nodesContaining(kw).forEach((p) => { const el = elevate(p); if (el && !isDisabled(el)) out.push({ e: el, t: TXT(el) }); }));
+      return out;
+    };
+    const waitFor = (pred, timeoutMs, intervalMs) => new Promise((resolve) => {
+      const t0 = Date.now();
+      const tick = () => { let r = false; try { r = pred(); } catch (e) {} if (r) return resolve(true); if (Date.now() - t0 > timeoutMs) return resolve(false); setTimeout(tick, intervalMs || 600); };
+      tick();
+    });
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    return { L: L, TXT: TXT, visible: visible, shadowRoots: shadowRoots, deepAll: deepAll, nodesContaining: nodesContaining, elevate: elevate, clickEl: clickEl, isDisabled: isDisabled, setInput: setInput, fieldByLabel: fieldByLabel, btnByText: btnByText, waitFor: waitFor, sleep: sleep };
+  })();
+
+  // 步骤1：搜索结果页 → 点第一个商品
+  window.__IH_1688_OPEN_FIRST = async function () {
+    const log = [];
+    const ok = await DS.waitFor(() => DS.deepAll("a").filter((a) => /offer\/\d+/i.test(a.href || "") && DS.visible(a)).length > 0 || DS.btnByText(["立即下单", "发起订单"]).length > 0, 14000);
+    if (!ok) { log.push("未检测到搜索结果商品卡片"); return { ok: false, step: "search", log: log }; }
+    const cards = DS.deepAll("a").filter((a) => /offer\/\d+/i.test(a.href || "") && DS.visible(a));
+    if (!cards.length) { log.push("未找到商品卡片链接（offer/数字）"); return { ok: false, step: "search", log: log }; }
+    DS.clickEl(cards[0]);
+    log.push("已点击第一个商品：" + (cards[0].href || "").slice(0, 70));
+    return { ok: true, step: "detail", log: log };
+  };
+
+  // 步骤2：商品详情页 → 选默认规格 + 点「立即下单/发起订单」
+  window.__IH_1688_BUY = async function () {
+    const log = [];
+    await DS.waitFor(() => DS.btnByText(["立即下单", "发起订单", "一键下单", "立即购买"]).length > 0, 14000);
+    // 选规格：点击前若干可见规格项（避免 SKU 未选导致下单失败）；不强行全选，best-effort
+    const specItems = DS.deepAll("[class*='sku'], [class*='spec'], [data-sku], [class*='SKU']").filter((e) => { const t = DS.TXT(e); return DS.visible(e) && /^(li|span|div|button|a|label)$/i.test(e.tagName) && t.length > 0 && t.length <= 30; });
+    let n = 0;
+    for (const s of specItems.slice(0, 10)) { if (!DS.isDisabled(s)) { try { DS.clickEl(s); n++; } catch (e) {} } }
+    log.push("已尝试选规格项 " + n + " 个");
+    await DS.sleep(300);
+    const btns = DS.btnByText(["立即下单", "发起订单", "一键下单", "立即购买"]);
+    if (!btns.length) { log.push("未找到下单按钮"); return { ok: false, step: "detail", log: log }; }
+    const live = btns.filter((b) => !DS.isDisabled(b.e));
+    DS.clickEl((live[0] || btns[0]).e);
+    log.push("已点击：" + ((live[0] || btns[0]).t));
+    return { ok: true, step: "confirm", log: log };
+  };
+
+  // 步骤3（核心）：确认订单页 → 填收货地址
+  window.__IH_1688_FILL = async function (addr) {
+    const log = [];
+    addr = addr || {};
+    await DS.waitFor(() => DS.nodesContaining("收货").length > 0 || DS.btnByText(["新增", "添加收货", "修改", "管理地址"]).length > 0, 12000);
+    // 1) 找「新增/添加收货地址」入口
+    let addBtn = DS.btnByText(["新增收货地址", "添加收货地址", "新增地址", "添加地址"])[0] || DS.btnByText(["新增", "添加"])[0];
+    if (addBtn) { DS.clickEl(addBtn.e); log.push("已点新增收货地址（" + addBtn.t + "）"); await DS.sleep(900); } else { log.push("未发现「新增收货地址」按钮（可能已有地址列表，尝试直接填）"); }
+    // 2) 填表单：收货人（照抄含分机如 吴**[0255]）/ 手机（11位主号）/ 详细地址（含分机）
+    const nameInput = DS.fieldByLabel("收货人") || DS.fieldByLabel("收货名");
+    const phoneInput = DS.fieldByLabel("手机") || DS.fieldByLabel("电话") || DS.fieldByLabel("手机号码");
+    const addrInput = DS.fieldByLabel("详细地址") || DS.fieldByLabel("地址");
+    const okN = nameInput ? DS.setInput(nameInput, addr.name) : false;
+    const okP = phoneInput ? DS.setInput(phoneInput, addr.phone) : false;
+    const okA = addrInput ? DS.setInput(addrInput, addr.address) : false;
+    log.push("填 收货人=" + okN + " 手机=" + okP + " 地址=" + okA);
+    if (!(okN && okP && okA)) log.push("⚠ 部分字段未填（姓名/手机/地址定位失败），请人工核对后再保存");
+    // 3) 省市区：best-effort 选首项，失败留人工
+    const region = DS.fieldByLabel("所在地区") || DS.fieldByLabel("地区") || DS.fieldByLabel("省") || DS.fieldByLabel("收货地区");
+    if (region) { DS.clickEl(region); await DS.sleep(450); const opt = DS.deepAll("li,[role=option],.next-cascader-menu-item,[class*='cascader'] *").filter((e) => DS.visible(e) && DS.TXT(e).length > 0 && DS.TXT(e).length <= 12)[0]; if (opt) { DS.clickEl(opt); log.push("已尝试选地区首项（" + DS.TXT(opt) + "），请人工确认省市区是否正确"); } else { log.push("地区控件已点，但未找到可选项，请人工选择省市区"); } }
+    // 4) 保存
+    const save = DS.btnByText(["保存", "保存并使用", "确定", "提交订单", "提交"])[0];
+    if (save) { DS.clickEl(save.e); log.push("已点保存（" + save.t + "）"); } else { log.push("⚠ 未找到保存按钮，请人工保存"); }
+    return { ok: !!(okN && okP && okA), step: "done", log: log, filled: { name: okN, phone: okP, address: okA } };
+  };
+
+  // 诊断：返回当前 1688 页面关键元素探测快照（用户实测把快照发回即可精修选择器）
+  window.__IH_1688_DIAG = function () {
+    const snap = { url: location.href.slice(0, 110), found: {} };
+    try {
+      snap.found.nameInput = !!DS.fieldByLabel("收货人");
+      snap.found.phoneInput = !!(DS.fieldByLabel("手机") || DS.fieldByLabel("电话"));
+      snap.found.addrInput = !!(DS.fieldByLabel("详细地址") || DS.fieldByLabel("地址"));
+      snap.found.region = !!(DS.fieldByLabel("所在地区") || DS.fieldByLabel("地区") || DS.fieldByLabel("省"));
+      snap.found.addBtns = DS.btnByText(["新增收货地址", "添加收货地址", "新增地址", "添加地址", "新增", "添加"]).map((b) => b.t);
+      snap.found.saveBtns = DS.btnByText(["保存", "保存并使用", "确定", "提交订单", "提交"]).map((b) => b.t);
+      snap.cards = DS.deepAll("a").filter((a) => /offer\/\d+/i.test(a.href || "") && DS.visible(a)).length;
+      snap.buyBtns = DS.btnByText(["立即下单", "发起订单", "一键下单", "立即购买"]).map((b) => b.t);
+    } catch (e) { snap.err = String(e && e.message || e); }
+    return snap;
+  };
+
+  // content script 自动驱动：按 storage.session.dsTask 状态机跨页面续跑
+  window.__IH_DS_AUTO = async function () {
+    let task = null;
+    try { task = await new Promise((res) => { try { chrome.storage.session.get(["dsTask"], (r) => res(r && r.dsTask)); } catch (e) { res(null); } }); } catch (e) { return; }
+    if (!task || task.step === "done" || task.step === "error") return;
+    const L = (m) => { try { task.log = task.log || []; task.log.push(m); chrome.storage.session.set({ dsTask: task }); } catch (e) {} };
+    L("@" + location.href.slice(0, 80) + " step=" + task.step);
+    try {
+      if (/offer_search\.htm/i.test(location.href) && (task.step === "init" || task.step === "search")) {
+        task.step = "search"; chrome.storage.session.set({ dsTask: task });
+        const r = await window.__IH_1688_OPEN_FIRST(); r.log.forEach(L);
+        task.step = r.ok ? "detail" : "error"; chrome.storage.session.set({ dsTask: task });
+      } else if (/\/offer\/\d+/i.test(location.href) && task.step === "detail") {
+        const r = await window.__IH_1688_BUY(); r.log.forEach(L);
+        task.step = r.ok ? "confirm" : "error"; chrome.storage.session.set({ dsTask: task });
+      } else if (/trade\.1688\.com|confirmOrder|order\/confirm|address/i.test(location.href) && task.step === "confirm") {
+        const r = await window.__IH_1688_FILL(task.addr); r.log.forEach(L);
+        task.step = r.ok ? "done" : "error"; chrome.storage.session.set({ dsTask: task });
+      }
+    } catch (e) { task.step = "error"; L("异常：" + (e && e.message || e)); try { chrome.storage.session.set({ dsTask: task }); } catch (x) {} }
+  };
+  // 1688 每个页面加载后自动尝试续跑（document_start 时 DOM 未就绪，延后触发，内部 waitFor 再等）
+  setTimeout(() => { try { window.__IH_DS_AUTO(); } catch (e) {} }, 1600);
+
   window.__IH_PAGE_EXPORT = async function (mode, skipCheck) {
     const out = { mode: mode, ok: false, frame: location.href.slice(0, 120), log: [] };
     const L2 = (m) => out.log.push(String(m));
@@ -2452,8 +2607,13 @@ if (typeof window !== "undefined") {
   window.__IH_PAGE.diagnose1688 = diagnose1688;
   window.__IH_PAGE.grab1688 = grab1688;
   window.__IH_PAGE.pddOrders = window.__IH_PDD_ORDERS;
-  window.__IH_PAGE.ver = "3.3.6";
-  window.__IH_PAGE_VER = "3.3.6";
+  window.__IH_PAGE.dsOpenFirst = window.__IH_1688_OPEN_FIRST;
+  window.__IH_PAGE.dsBuy = window.__IH_1688_BUY;
+  window.__IH_PAGE.dsFill = window.__IH_1688_FILL;
+  window.__IH_PAGE.dsDiag = window.__IH_1688_DIAG;
+  window.__IH_PAGE.dsAuto = window.__IH_DS_AUTO;
+  window.__IH_PAGE.ver = "3.3.7";
+  window.__IH_PAGE_VER = "3.3.7";
   // 脚本注入即武装网络探针：用户后续在页面上的任何导出都会被捕获，无需先点诊断
   try { installNetHook1688(); } catch (e) { /* 忽略 */ }
 }

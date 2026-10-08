@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "电商订单信息助手",
-  "version": "3.3.6",
+  "version": "3.3.7",
   "description": "电商开票助手：1688「导出当前条件」与拼多多订单导出自动捕获解析入库（分区管理，1688 不做自动导出避免重复下载），按快递单号+快递公司匹配，生成按卖家分组开票清单与开票跟踪表，支持开票状态回填。本地处理，不上传服务器。",
   "permissions": ["activeTab", "scripting", "storage", "downloads"],
   "host_permissions": [

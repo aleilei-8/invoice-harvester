@@ -20,21 +20,30 @@
     .tag.bad { background: #fde8e8; color: #c0392b; }
     a.act { color: #1668dc; font-size: 13px; text-decoration: none; margin-top: 6px; display: inline-block; }
     .empty { color: #9aa5b1; font-size: 13px; text-align: center; padding: 30px 0; }
+    .acts { display: flex; gap: 10px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
+    .act-buy { background: #18884a; color: #fff; border: none; padding: 6px 12px; border-radius: 6px; font-size: 13px; cursor: pointer; }
+    .act-buy:hover { background: #136b3a; }
+    a.link { margin-top: 0; }
+    #diag { background: #e6effb; color: #1668dc; }
+    #tasklog { display: none; margin-top: 14px; padding: 10px 12px; background: #0f1b2d; color: #cfe3ff; border-radius: 8px; font-size: 12px; line-height: 1.6; max-height: 240px; overflow: auto; }
+    #tasklog pre { white-space: pre-wrap; word-break: break-all; margin: 6px 0 0; color: #9fe6c0; }
   </style>
 </head>
 <body>
   <h1>代发采购草稿工作台</h1>
   <div class="hint">
-    ① 在拼多多商家后台打开「待发货」订单列表页 → ② 点「扫描订单」自动抽取收货信息（含隐私号+分机）→ ③ 点「去1688采购」跳转搜同款。<br/>
-    <b>不自动付款、不自动提交、不自动发货</b>，仅生成草稿，人工确认。
+    ① 在拼多多商家后台打开「待发货」订单列表页 → ② 点「扫描订单」自动抽取收货信息（含隐私号+分机）→ ③ 点卡片「自动搜同款并填收货」：自动打开 1688 搜索、点进商品、选规格、到确认页自动填收货。<br/>
+    <b>不自动付款、不自动提交、不自动发货</b>，仅替代最累的找货+填单，最后人工确认下单。
   </div>
   <div class="bar">
     <button id="scan">扫描当前 PDD 订单页</button>
     <button id="scanManual" class="ghost">用粘贴的文本解析</button>
     <button id="clear" class="ghost">清空</button>
+    <button id="diag">在1688页诊断</button>
   </div>
   <textarea id="paste" placeholder="备用：把订单「收货信息」区文本粘贴到这里，再点「用粘贴的文本解析」"></textarea>
   <div id="list"><div class="empty">尚未扫描。请先在拼多多后台打开订单列表页。</div></div>
+  <div id="tasklog"></div>
 
   <script src="dropship_draft.js"></script>
   <script src="dropship_panel.js"></script>

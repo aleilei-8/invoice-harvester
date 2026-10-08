@@ -388,7 +388,7 @@ function grab() {
 // ===== 抓取全部页（自动翻页）=====
 const MAX_PAGES = 200;
 // 与 pagefuncs.js 里 window.__IH_PAGE.ver 保持一致：用于识别「页面里跑的是不是当前版本」
-const PAGE_VER = "3.3.6";
+const PAGE_VER = "3.3.7";
 let grabbingAll = false;
 
 function injectOnce(tabId, func, args) {
