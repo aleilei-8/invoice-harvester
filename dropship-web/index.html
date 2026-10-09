@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>代发助手 · 手机版</title>
+<style>
+  :root{
+    --bg:#f4f6fb; --card:#ffffff; --ink:#1f2733; --sub:#67738a;
+    --line:#e4e9f2; --brand:#2f6bff; --brand-d:#1d4fd6;
+    --ok:#1aa06d; --warn:#e8841a; --bad:#e0483b; --soft:#eef3ff;
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent;}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font:16px/1.55 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
+    padding:env(safe-area-inset-top) 0 calc(20px + env(safe-area-inset-bottom));
+  }
+  header{
+    position:sticky; top:0; z-index:20; background:linear-gradient(135deg,#2f6bff,#5a8bff);
+    color:#fff; padding:14px 16px; box-shadow:0 2px 10px rgba(47,107,255,.25);
+  }
+  header h1{margin:0; font-size:18px; font-weight:700; letter-spacing:.5px;}
+  header p{margin:2px 0 0; font-size:12px; opacity:.9;}
+  .wrap{max-width:640px; margin:0 auto; padding:14px 14px 0;}
+  .sec{
+    background:var(--card); border:1px solid var(--line); border-radius:14px;
+    padding:14px; margin-bottom:14px; box-shadow:0 1px 4px rgba(20,30,60,.04);
+  }
+  .sec h2{margin:0 0 10px; font-size:16px; display:flex; align-items:center; gap:8px;}
+  .sec h2 .n{
+    width:22px; height:22px; border-radius:50%; background:var(--brand); color:#fff;
+    font-size:13px; display:flex; align-items:center; justify-content:center; flex:0 0 auto;
+  }
+  .step{font-size:12px; color:var(--sub); margin:-6px 0 10px;}
+  textarea,input{
+    width:100%; border:1px solid var(--line); border-radius:10px; padding:11px 12px;
+    font-size:15px; background:#fbfcfe; color:var(--ink); outline:none; font-family:inherit;
+  }
+  textarea{min-height:96px; resize:vertical;}
+  input:focus,textarea:focus{border-color:var(--brand); background:#fff;}
+  .row{display:flex; gap:8px; margin-top:8px; flex-wrap:wrap;}
+  .row.two input{flex:1; min-width:120px;}
+  button{
+    border:none; border-radius:10px; padding:12px 14px; font-size:15px; font-weight:600;
+    cursor:pointer; min-height:46px; transition:.15s; font-family:inherit;
+  }
+  .btn-primary{background:var(--brand); color:#fff; flex:1;}
+  .btn-primary:active{background:var(--brand-d);}
+  .btn-ghost{background:var(--soft); color:var(--brand); flex:1;}
+  .btn-ghost:active{background:#dfe8ff;}
+  .btn-line{background:#fff; color:var(--ink); border:1px solid var(--line); flex:1;}
+  .btn-sm{font-size:13px; padding:9px 12px; min-height:40px;}
+  .out{
+    margin-top:12px; border:1px dashed var(--line); border-radius:10px; padding:12px;
+    background:#fafcff; display:none;
+  }
+  .out.show{display:block;}
+  .field{display:flex; align-items:baseline; gap:8px; padding:5px 0; border-bottom:1px solid #f0f3f9;}
+  .field:last-child{border-bottom:none;}
+  .field .k{color:var(--sub); font-size:13px; flex:0 0 64px;}
+  .field .v{font-weight:600; word-break:break-all; flex:1;}
+  .tag{display:inline-block; font-size:11px; padding:2px 7px; border-radius:6px; font-weight:700; margin-left:6px;}
+  .tag.ok{background:#e6f7ef; color:var(--ok);}
+  .tag.warn{background:#fdf0e0; color:var(--warn);}
+  .tag.bad{background:#fdeae8; color:var(--bad);}
+  .blk{
+    white-space:pre-wrap; word-break:break-all; background:#fff; border:1px solid var(--line);
+    border-radius:8px; padding:10px; font-size:14px; margin-top:8px;
+  }
+  .hint{font-size:12px; color:var(--sub); margin-top:8px;}
+  .toast{
+    position:fixed; left:50%; bottom:40px; transform:translateX(-50%) translateY(20px);
+    background:rgba(31,39,51,.94); color:#fff; padding:10px 18px; border-radius:24px;
+    font-size:14px; opacity:0; pointer-events:none; transition:.25s; z-index:50;
+  }
+  .toast.show{opacity:1; transform:translateX(-50%) translateY(0);}
+  details{margin-top:6px;}
+  details summary{font-size:13px; color:var(--brand); cursor:pointer; padding:6px 0;}
+  details .box{font-size:12px; color:var(--sub); line-height:1.7; padding:8px 0;}
+  .demo{font-size:12px; color:var(--brand); background:none; border:none; padding:4px 0; text-decoration:underline;}
+  footer{text-align:center; color:var(--sub); font-size:11px; padding:6px 16px 0;}
+</style>
+</head>
+<body>
+<header>
+  <h1>代发助手 · 手机版</h1>
+  <p>白天用手机也能 5 步搞定代发 · 不自动付款</p>
+</header>
+
+<div class="wrap">
+
+  <!-- ① 收货解析 -->
+  <section class="sec">
+    <h2><span class="n">1</span>PDD 收货 → 1688 收货块</h2>
+    <div class="step">把拼多多订单的「收货信息」整段粘贴进来，自动拆出虚拟号主号+分机。</div>
+    <textarea id="recInput" placeholder="例：收货人：吴**[0255] 手机号 19959783357 当前手机号为隐私号 联系地址 广东省 深圳市 龙华区 xxx y1008[0255] 复制"></textarea>
+    <div class="row">
+      <button class="btn-primary" onclick="parseRecipient()">解析</button>
+      <button class="btn-line btn-sm" onclick="fillDemo()">填示例</button>
+    </div>
+    <div class="out" id="recOut">
+      <div class="field"><span class="k">收货人</span><span class="v" id="oName"></span></div>
+      <div class="field"><span class="k">手机号</span><span class="v" id="oPhone"></span></div>
+      <div class="field"><span class="k">联系地址</span><span class="v" id="oAddr"></span></div>
+      <div class="field"><span class="k">状态</span><span class="v" id="oState"></span></div>
+      <div class="blk" id="recBlock"></div>
+      <div class="row">
+        <button class="btn-ghost" onclick="copyBlock()">① 复制收货块贴 1688</button>
+      </div>
+      <div class="hint">1688 新建地址里直接「粘贴」即可自动填好姓名/手机/地址（含分机）。</div>
+    </div>
+  </section>
+
+  <!-- ② 搜同款 -->
+  <section class="sec">
+    <h2><span class="n">2</span>1688 搜同款</h2>
+    <div class="step">填商品标题/规格，一键打开 1688 搜索（手机浏览器会跳 1688 App）。</div>
+    <div class="row two">
+      <input id="kwTitle" placeholder="商品标题，如：纯棉短袖 T 恤" />
+      <input id="kwSpec" placeholder="规格，如：白色 M" />
+    </div>
+    <div class="row">
+      <button class="btn-primary" onclick="open1688()">打开 1688 搜同款</button>
+    </div>
+  </section>
+
+  <!-- ③ 物流回填 -->
+  <section class="sec">
+    <h2><span class="n">3</span>1688 物流 → 回填拼多多</h2>
+    <div class="step">在 1688 下单后复制「快递公司 + 运单号」，生成可直接粘贴的回填文本。</div>
+    <div class="row two">
+      <input id="expName" placeholder="快递公司，如：中通" />
+      <input id="expNo" placeholder="运单号" />
+    </div>
+    <div class="row">
+      <button class="btn-primary" onclick="genShip()">生成回填文本</button>
+    </div>
+    <div class="out" id="shipOut">
+      <div class="blk" id="shipBlock"></div>
+      <div class="row">
+        <button class="btn-ghost" onclick="copyShip()">② 复制回填拼多多</button>
+        <button class="btn-line" onclick="openPdd()">打开 PDD 发货</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ④ 利润速算 -->
+  <section class="sec">
+    <h2><span class="n">4</span>利润速算</h2>
+    <div class="step">下单前秒算这单赚多少。</div>
+    <div class="row two">
+      <input id="pPaid" type="number" inputmode="decimal" placeholder="PDD 实付 ¥" />
+      <input id="pCost" type="number" inputmode="decimal" placeholder="1688 成本 ¥" />
+    </div>
+    <div class="row two">
+      <input id="pShip" type="number" inputmode="decimal" placeholder="运费 ¥（可空）" />
+      <button class="btn-primary" onclick="calcProfit()">算一下</button>
+    </div>
+    <div class="out" id="profitOut">
+      <div class="field"><span class="k">利润</span><span class="v" id="oProfit"></span></div>
+      <div class="field"><span class="k">利润率</span><span class="v" id="oRate"></span></div>
+    </div>
+  </section>
+
+  <details>
+    <summary>怎么放到手机上随时打开？</summary>
+    <div class="box">
+      本页是纯前端单文件，三种方式任选：<br>
+      ① <b>最省事</b>：用任意静态托管（Vercel / Cloudflare Pages / GitHub Pages）拖这个 html 上去，得到 https 链接，手机浏览器收藏即可。<br>
+      ② <b>零托管</b>：把 index.html 发到微信文件传输助手，手机用浏览器打开（部分复制功能在 http/file 下可能受限，建议托管）。<br>
+      ③ <b>iOS</b>：Safari 打开后「分享 → 添加到主屏幕」，就像 App 一样。<br>
+      所有解析都在你手机本地完成，订单信息不出本机。
+    </div>
+  </details>
+
+  <footer>代发助手手机版 · 解析逻辑与桌面插件同源 · 仅供本人代发使用</footer>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+/* ===== 以下逻辑与 pdd-invoice-grabber/dropship_draft.js 同源（已单测覆盖） ===== */
+function parseVirtualPhone(text){
+  if(!text) return {phone:null,ext:null,hasExt:false,isVirtual:false,raw:null};
+  const s=String(text);
+  const phoneMatch=s.match(/(?<!\d)(\d{11})(?!\d)/);
+  const phone=phoneMatch?phoneMatch[1]:null;
+  const extMatch=s.match(/\[(\d{4})\]/);
+  const ext=extMatch?extMatch[1]:null;
+  const isVirtual=!!(phone&&ext)||/隐私号/.test(s);
+  return {phone,ext,hasExt:!!ext,isVirtual,raw:s};
+}
+function parseRecipientBlock(text){
+  const s=String(text||"");
+  const out={name:null,phone:null,address:null,ext:null,confidence:"low"};
+  if(!s.trim()) return out;
+  const pv=parseVirtualPhone(s);
+  out.phone=pv.phone; out.ext=pv.ext;
+  const addrM=s.match(/(?:联系地址|收货地址|地址)[：:\s]*(.+)$/);
+  if(addrM) out.address=addrM[1].replace(/\s*复制.*$/,"").trim();
+  const nameM=s.match(/收货人[：:\s]*([^\n]*?)(?=\s*(?:手机号|联系地址|复制|$))/);
+  if(nameM) out.name=nameM[1].trim();
+  out.isVirtual=pv.isVirtual;
+  let c=0; if(out.phone)c++; if(out.name)c++; if(out.address)c++;
+  out.confidence=c>=3?"high":c===2?"mid":"low";
+  return out;
+}
+function normalizeSpec(specText){
+  if(!specText) return {raw:"",norm:""};
+  const raw=String(specText).replace(/\s+/g," ").trim();
+  const SPEC_MAP={"均码":"均码","m":"M","中码":"M","l":"L","大码":"L","xl":"XL","加大码":"XL","xxl":"2XL","2xl":"2XL","xxxl":"3XL","藏青":"深蓝","藏青色":"深蓝","深蓝色":"深蓝","宝蓝":"深蓝"};
+  const norm=SPEC_MAP[raw.toLowerCase()]||SPEC_MAP[raw]||raw;
+  return {raw,norm};
+}
+function build1688SearchUrl(title,spec){
+  const kw=[title,spec&&spec.raw?spec.raw:""].filter(Boolean).join(" ").trim();
+  return {keywords:kw,url:"https://s.1688.com/offer/offer_search.htm?keywords="+encodeURIComponent(kw)};
+}
+function computeProfit(pddPaid,cost,shipping){
+  const paid=Number(pddPaid)||0;
+  const c=Number(cost);
+  const sh=Number(shipping)||0;
+  if(!isFinite(c)) return {profit:null,note:"成本待填"};
+  return {profit:+(paid-c-sh).toFixed(2),note:""};
+}
+
+/* ===== 宽松兜底：App 复制的无标签文本 ===== */
+function parseLoose(text){
+  const s=String(text||"").replace(/复制完整信息|复制/g,"").trim();
+  const pv=parseVirtualPhone(s);
+  const out={name:null,phone:pv.phone,address:null,ext:pv.ext,confidence:"low",isVirtual:pv.isVirtual};
+  if(pv.phone){
+    const idx=s.indexOf(pv.phone);
+    const before=s.slice(0,idx).replace(/^[\s\S]*?(?:收货人|姓名)[：:\s]*/,"").trim();
+    const after=s.slice(idx+pv.phone.length).trim();
+    if(before) out.name=before;
+    if(after) out.address=after;
+  }
+  let c=0; if(out.phone)c++; if(out.name)c++; if(out.address)c++;
+  out.confidence=c>=3?"high":c===2?"mid":"low";
+  return out;
+}
+
+/* ===== UI 交互 ===== */
+const $=id=>document.getElementById(id);
+function toast(msg){
+  const t=$("toast"); t.textContent=msg; t.classList.add("show");
+  clearTimeout(t._t); t._t=setTimeout(()=>t.classList.remove("show"),1600);
+}
+async function copyText(txt){
+  try{
+    if(navigator.clipboard&&window.isSecureContext){ await navigator.clipboard.writeText(txt); return true; }
+  }catch(e){}
+  try{
+    const ta=document.createElement("textarea");
+    ta.value=txt; ta.style.position="fixed"; ta.style.opacity="0";
+    document.body.appendChild(ta); ta.focus(); ta.select();
+    const ok=document.execCommand("copy"); document.body.removeChild(ta); return ok;
+  }catch(e){ return false; }
+}
+
+let curBlock="";
+function parseRecipient(){
+  const raw=$("recInput").value.trim();
+  if(!raw){ toast("先粘贴收货信息"); return; }
+  let r=parseRecipientBlock(raw);
+  if(r.confidence==="low") r=parseLoose(raw);
+  $("oName").textContent=r.name||"—";
+  $("oPhone").textContent=r.phone||"—";
+  $("oAddr").textContent=r.address||"—";
+  const needPhone=!(r.phone&&r.ext);
+  let tag="";
+  if(needPhone) tag='<span class="tag bad">缺主号/分机·待补</span>';
+  else if(r.isVirtual) tag='<span class="tag ok">虚拟号已拆✓</span>';
+  else tag='<span class="tag warn">非虚拟号</span>';
+  $("oState").innerHTML=tag+(r.ext?(' 分机['+r.ext+']'):'');
+  curBlock=[r.name||"", r.phone||"", r.address||""].filter(Boolean).join("\n");
+  $("recBlock").textContent=curBlock||"—";
+  $("recOut").classList.add("show");
+}
+function copyBlock(){
+  if(!curBlock){ toast("请先解析"); return; }
+  copyText(curBlock).then(ok=>toast(ok?"已复制收货块✓":"复制失败，请手动选"));
+}
+async function copyShip(){
+  const b=$("shipBlock").textContent;
+  if(!b||b==="—"){ toast("请先生成"); return; }
+  copyText(b).then(ok=>toast(ok?"已复制回填文本✓":"复制失败，请手动选"));
+}
+function open1688(){
+  const title=$("kwTitle").value.trim();
+  const spec=normalizeSpec($("kwSpec").value.trim());
+  if(!title){ toast("先填商品标题"); return; }
+  const {url}=build1688SearchUrl(title,spec);
+  window.open(url,"_blank");
+}
+function genShip(){
+  const n=$("expName").value.trim();
+  const no=$("expNo").value.trim();
+  if(!no){ toast("先填运单号"); return; }
+  const blk=n? (n+" "+no) : no;
+  $("shipBlock").textContent=blk;
+  $("shipOut").classList.add("show");
+  toast("已生成");
+}
+function openPdd(){
+  window.open("https://mobile.yangkeduo.com/","_blank");
+}
+function calcProfit(){
+  const paid=$("pPaid").value, cost=$("pCost").value, sh=$("pShip").value;
+  const r=computeProfit(paid,cost,sh);
+  if(r.profit===null){ $("oProfit").textContent="成本待填"; $("oRate").textContent="—"; }
+  else{
+    const paidN=Number(paid)||0;
+    const rate=paidN>0?((r.profit/paidN)*100).toFixed(1)+"%":"—";
+    $("oProfit").textContent="¥"+r.profit;
+    $("oProfit").style.color=r.profit>=0?"var(--ok)":"var(--bad)";
+    $("oRate").textContent=rate;
+  }
+  $("profitOut").classList.add("show");
+}
+function fillDemo(){
+  $("recInput").value="收货人：吴**[0255] 手机号 19959783357 当前手机号为隐私号 联系地址 广东省 深圳市 龙华区 xxx 下一层楼梯(送货上门) y1008[0255] 复制";
+  parseRecipient();
+}
+</script>
+</body>
+</html>
