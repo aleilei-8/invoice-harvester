@@ -1,0 +1,18 @@
+{
+  "name": "dropship-bot",
+  "version": "0.1.0",
+  "private": true,
+  "description": "常驻代发机器人：轮询 PDD 新订单 → 1688 建采购单（填虚拟号收货）→ 通知 → 人工付款 → 回填物流",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/run.js",
+    "dry": "node src/run.js --dry-run",
+    "test": "node test/sign.test.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "playwright": "^1.48.0"
+  }
+}

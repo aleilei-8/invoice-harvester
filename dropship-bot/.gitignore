@@ -1,0 +1,7 @@
+# 凭证与订单数据（切勿提交）
+.env
+state.json
+.p1688/
+
+# 依赖与产物
+node_modules/
